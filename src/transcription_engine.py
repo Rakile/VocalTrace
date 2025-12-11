@@ -96,6 +96,7 @@ def hhmmss_msec(seconds: float) -> str:
 
 def run_diarization(audio_path, num_speakers, hf_token):
     from pyannote.audio import Pipeline
+    from pyannote.audio.pipelines.utils.hook import ProgressHook
 
     # Select Model
     precision_api_key = os.getenv("PYANNOTE_PRECISION2_API_KEY")
@@ -121,11 +122,16 @@ def run_diarization(audio_path, num_speakers, hf_token):
 
     # --- NATIVE PYANNOTE CALL (No manual loading) ---
     try:
-        # Pyannote pipeline handles loading via torchcodec/ffmpeg internally now
-        if num_speakers and num_speakers > 0:
-            output = pipeline(audio_path, num_speakers=num_speakers)
+        if model_id == "pyannote/speaker-diarization-precision-2":
+            output = pipeline(audio_path) #Run on pyannoteAI servers
         else:
-            output = pipeline(audio_path)
+            # Pyannote pipeline handles loading via torchcodec/ffmpeg internally now and runs locally
+            if num_speakers and num_speakers > 0:
+                with ProgressHook() as hook:
+                    output = pipeline(audio_path, preload=True, hook=hook, num_speakers=num_speakers)
+            else:
+                with ProgressHook() as hook:
+                    output = pipeline(audio_path, preload=True, hook=hook)
     except Exception as e:
         print(f"[!] Diarization Execution Failed: {e}")
         return []
