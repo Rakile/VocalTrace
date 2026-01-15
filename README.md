@@ -64,7 +64,7 @@ Use either `venv` or Conda.
 
 **venv (recommended for GUI stability on Windows)**
 ```bash
-python -m venv .venv –python=python3.12
+python3.12 -m venv .venv
 # Windows
 .venv\Scripts\activate
 # Linux/macOS
@@ -280,4 +280,5 @@ Use the "Chat with Evidence" tab to query your transcript. The system uses **Ret
 
 VocalTrace is licensed under the **MIT License**. (See `LICENSE.txt` for details).
 *Note: We recommend the MIT license for software over CC-BY to ensure compatibility with open-source repositories.*
+
 
