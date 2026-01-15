@@ -1,13 +1,21 @@
+import logging
 import torch
-from sentence_transformers import SentenceTransformer, util
 import textwrap
+log = logging.getLogger(__name__)
 
+try:
+    from sentence_transformers import SentenceTransformer, util
+except ImportError:  # pragma: no cover
+    SentenceTransformer = None
+    util = None
 
 class EvidenceRetriever:
-    def __init__(self):
-        print("[RAG] Loading Embedding Model (all-MiniLM-L6-v2)...")
+    def __init__(self, model_name: str = 'all-MiniLM-L6-v2'):
+        log.info("[RAG] Loading embedding model (%s)...", model_name)
         # This is a small, fast, and accurate model for semantic search
-        self.embedder = SentenceTransformer('all-MiniLM-L6-v2')
+        if SentenceTransformer is None:
+            raise ImportError("sentence-transformers is required for RAG. Install with: pip install sentence-transformers")
+        self.embedder = SentenceTransformer(model_name)
 
         # Check for GPU
         self.device = "cuda" if torch.cuda.is_available() else "cpu"

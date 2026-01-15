@@ -7,7 +7,7 @@ import os
 
 # Import Backend
 from rag_engine import EvidenceRetriever, generate_rag_prompt
-from analysis_engine import call_llm_openai, call_llm_gemini_25_pro
+from analysis_engine import call_llm_openai, call_llm_gemini_25_pro, call_llm_lmstudio
 
 
 # --- WORKER 1: CHAT RESPONSE ---
@@ -32,7 +32,9 @@ class ChatWorker(QThread):
 
             prompt = generate_rag_prompt(self.query, relevant_chunks, role_instruction=self.role)
 
-            if "gemini" in self.provider.lower():
+            if "lmstudio" in self.provider.lower():
+                response = call_llm_lmstudio(self.model_name, prompt)
+            elif "gemini" in self.provider.lower():
                 response = call_llm_gemini_25_pro(self.model_name, prompt)
             else:
                 response = call_llm_openai(self.model_name, prompt)
@@ -142,7 +144,11 @@ class ChatTab(QWidget):
 
     def set_model_config(self, provider_label):
         provider_label = provider_label.lower()
-        if "gemini" in provider_label:
+        if "lmstudio" in provider_label:
+            self.current_provider = "lmstudio"
+            chosen_model = provider_label.lower().replace("lmstudio", "openai")
+            self.current_model_name = chosen_model
+        elif "gemini" in provider_label:
             self.current_provider = "gemini"
             self.current_model_name = provider_label
         elif "gpt" in provider_label:

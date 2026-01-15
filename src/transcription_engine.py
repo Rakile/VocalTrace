@@ -8,12 +8,14 @@ Feature: Added Progress Bar (tqdm).
 """
 
 import os
+import shutil
 import sys
 import warnings
 import argparse
 import gc
 import json
 import subprocess
+import logging
 import numpy as np
 import torch
 import torchaudio
@@ -22,25 +24,16 @@ from typing import List, Dict, Any
 from analysis_engine import analyze_conversation, call_llm_openai, call_llm_grokai, normalize_analysis_schema
 from transformers import pipeline, AutoModelForSpeechSeq2Seq, AutoProcessor
 from langdetect import detect, LangDetectException
+log = logging.getLogger(__name__)
+#Put some audio processing functions in here (maybe move to separate class ("audio_processing.py" maybe)
+from scipy.io import wavfile
+import noisereduce as nr
 
 # --- CRITICAL FLAGS FOR PYANNOTE STABILITY ---
 torch.backends.cuda.matmul.allow_tf32 = False
 torch.backends.cudnn.allow_tf32 = False
 
-# --- PYANNOTE MONKEY PATCH (Fixes Issue #1861) ---
-try:
-    from pyannote.audio.models.blocks.pooling import StatsPool
-    def patched_forward(self, sequences, weights=None):
-        mean = sequences.mean(dim=-1)
-        if sequences.size(-1) > 1:
-            std = sequences.std(dim=-1, correction=1)
-        else:
-            std = torch.zeros_like(mean)
-        return torch.cat([mean, std], dim=-1)
-    StatsPool.forward = patched_forward
-    print("[i] Pyannote StatsPool.forward patched successfully.")
-except ImportError:
-    print("[!] Warning: Could not patch StatsPool. Pyannote might not be installed correctly.")
+
 
 # Try to import tqdm for progress bar
 try:
@@ -94,10 +87,12 @@ def hhmmss_msec(seconds: float) -> str:
 
 # --- Diarization (Step 1) -----------------------------------------------------
 
-def run_diarization(audio_path, num_speakers, hf_token):
+def run_diarization(audio_path, num_speakers, hf_token, *, diarization_model: str = "unknown",):
     from pyannote.audio import Pipeline
     from pyannote.audio.pipelines.utils.hook import ProgressHook
-
+    from audio_processing_profiles import AudioProcessingProfiles
+    from pyannote.audio.telemetry import set_telemetry_metrics
+    set_telemetry_metrics(False)
     # Select Model
     precision_api_key = os.getenv("PYANNOTE_PRECISION2_API_KEY")
     if precision_api_key:
@@ -105,33 +100,44 @@ def run_diarization(audio_path, num_speakers, hf_token):
         token = precision_api_key
         print(f"[i] Using diarization model: {model_id}")
     else:
-        model_id = "pyannote/speaker-diarization-community-1"
+        # GUI may pass "Auto"/"unknown"/empty; treat that as default
+        if not diarization_model or str(diarization_model).strip().lower() in ("auto", "unknown", "default"):
+            model_id = "pyannote/speaker-diarization-3.1"
+        else:
+            model_id = diarization_model
         token = hf_token
         print(f"[i] Using diarization model: {model_id}")
 
     try:
-        pipeline = Pipeline.from_pretrained(model_id, token=token)
+        diarization_pipeline = Pipeline.from_pretrained(model_id, token=token)  # Renamed for clarity
     except Exception as e:
-        print(f"[!] Error loading Pyannote: {e}")
-        sys.exit(1)
+        raise RuntimeError(f"Error loading Pyannote: {e}") from e
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    pipeline.to(device)
+    diarization_pipeline.to(device)
+    #diarization_pipeline2.to(device)
 
-    print(f"[i] Diarizing audio file: {os.path.basename(audio_path)}")
+    # Process audio for diarization
+    audio_cleaner = AudioProcessingProfiles(sample_rate=16000)
+    audio_path_for_diarization = audio_cleaner.process_for_pyannote(
+        audio_path,
+        use_processing=False
+    )
+
+    print(f"[i] Diarizing audio file: {os.path.basename(audio_path_for_diarization)}")
 
     # --- NATIVE PYANNOTE CALL (No manual loading) ---
     try:
+        audio_dict = load_audio_via_ffmpeg(audio_path_for_diarization, target_sr=16000, mono=True)
         if model_id == "pyannote/speaker-diarization-precision-2":
-            output = pipeline(audio_path) #Run on pyannoteAI servers
+            output = diarization_pipeline(audio_dict)
         else:
-            # Pyannote pipeline handles loading via torchcodec/ffmpeg internally now and runs locally
             if num_speakers and num_speakers > 0:
                 with ProgressHook() as hook:
-                    output = pipeline(audio_path, preload=True, hook=hook, num_speakers=num_speakers)
+                    output = diarization_pipeline(audio_dict, hook=hook, num_speakers=num_speakers)
             else:
                 with ProgressHook() as hook:
-                    output = pipeline(audio_path, preload=True, hook=hook)
+                    output = diarization_pipeline(audio_dict, hook=hook)
     except Exception as e:
         print(f"[!] Diarization Execution Failed: {e}")
         return []
@@ -145,30 +151,33 @@ def run_diarization(audio_path, num_speakers, hf_token):
     elif hasattr(output, "annotation"):
         ann = output.annotation
     else:
-        # In simple pipeline usage, output IS the annotation
         ann = output
 
     segments = []
-    # itertracks yields (Segment, Track, Label)
     for turn, _, speaker in ann.itertracks(yield_label=True):
         segments.append({"start": turn.start, "end": turn.end, "speaker": speaker})
 
-    del pipeline, output, ann
+    audio_cleaner.cleanup_temp_files()
+    del diarization_pipeline, output, ann, audio_cleaner
     cleanup_vram()
     return segments
 
 
 
 # --- Merging Logic (Step 2: The "Natural Flow" Threshold) ---------------------
-
-def merge_close_segments(segments, gap_threshold=2.0):
+#size_unknown_speaker is the max length (1 second is default) an unidentified speaker clip (SPEAKER_xx) can be, for it to merge and become one with an identified speaker clip (also they can't be separated by more than "gap_threshold" (default 2 seconds)).
+def merge_close_segments(segments, gap_threshold=2.0, unknown_speaker_length_threshold=1.0):
     if not segments: return []
     merged = []
     current = segments[0].copy()
     for next_seg in segments[1:]:
-        if (next_seg["speaker"] == current["speaker"] and
-                (next_seg["start"] - current["end"]) < gap_threshold):
+        if next_seg["speaker"] == current["speaker"] and (next_seg["start"] - current["end"]) < gap_threshold:
             current["end"] = next_seg["end"]
+        elif not current["speaker"].startswith("SPEAKER_") and next_seg["speaker"].startswith("SPEAKER_") and (next_seg["end"] - next_seg["start"]) < unknown_speaker_length_threshold and (next_seg["start"] - current["end"]) < gap_threshold:
+            current["end"] = next_seg["end"]
+        elif current["speaker"].startswith("SPEAKER_") and not next_seg["speaker"].startswith("SPEAKER_") and (next_seg["end"] - next_seg["start"]) < unknown_speaker_length_threshold and (next_seg["start"] - current["end"]) < gap_threshold:
+            current["end"] = next_seg["end"]
+            current["speaker"] = next_seg["speaker"]
         else:
             merged.append(current)
             current = next_seg.copy()
@@ -178,55 +187,62 @@ def merge_close_segments(segments, gap_threshold=2.0):
 
 # --- ASR on Clips (Step 3) ----------------------------------------------------
 
-def transcribe_segments(audio_path, segments, model_id, language, device, progress_callback=None):
+def transcribe_segments(audio_path, segments, model_id, language, device, *, progress_callback=None):
+    from audio_processing_profiles import AudioProcessingProfiles
     print(f"[i] Loading Whisper model: {model_id}...")
-    torch_dtype = torch.float16 if device == "cuda" else torch.float32
+    #waveform = decode_audio(audio_path)
+    # Crop 30s max
+    #sr = 16000
+    #if waveform.shape[1] > sr * 30:
+    #    mid = waveform.shape[1] // 2
+    #    waveform = waveform[:, mid:mid + (sr * 30)]
 
-    model = AutoModelForSpeechSeq2Seq.from_pretrained(
-        model_id, dtype=torch_dtype, low_cpu_mem_usage=False, use_safetensors=True
-    ).to(device)
+    #text = whisper_infer(waveform, "openai/whisper-small")
 
-    processor = AutoProcessor.from_pretrained(model_id)
+    ## Preload "pipe"
+    ############################################################################################################
+    device = "cuda:0" if torch.cuda.is_available() else "cpu"
+    torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
 
-    # --- UPDATED GENERATION CONFIG ---
+    try:
+        model = AutoModelForSpeechSeq2Seq.from_pretrained(
+            model_id,
+            dtype=torch_dtype,
+            low_cpu_mem_usage=True,
+            use_safetensors=True,
+            attn_implementation="flash_attention_2",
+        ).to(device)
+    except Exception as e:
+        log.warning("flash_attention_2 unavailable; falling back to eager attention (%s)", e)
+        model = AutoModelForSpeechSeq2Seq.from_pretrained(
+            model_id,
+            dtype=torch_dtype,
+            low_cpu_mem_usage=True,
+            use_safetensors=True,
+            attn_implementation="eager",
+        ).to(device)
+
+    whisper_processor = AutoProcessor.from_pretrained(model_id)
     generate_kwargs = {
         "task": "transcribe",
-        "condition_on_prev_tokens": False, # Crucial for segmented audio to prevent loops
-        "temperature": 0.0,                # Greedy decoding (most accurate, least creative)
-        # "no_repeat_ngram_size": 3,         # OPTIONAL: Uncomment if loops persist. Prevents "oh yeah oh yeah"
-        "repetition_penalty": 1.1          # OPTIONAL: Penalizes repetition slightly
+        "num_beams": 2,
+        "condition_on_prev_tokens": False,
+        "compression_ratio_threshold": 1.35,  # zlib compression ratio threshold (in token space)
+        "temperature": (0.0, 0.2, 0.4, 0.6, 0.8, 1.0),
+        "logprob_threshold": -1.0,
+        "no_speech_threshold": 0.6,
+        "return_timestamps" : True
     }
-    if language.lower().startswith("sv"):
-        generate_kwargs["language"] = "sv"
-    elif language.lower().startswith("en"):
-        generate_kwargs["language"] = "en"
-    else:
-        generate_kwargs["language"] = language
-
-    asr_pipe = pipeline(
-        "automatic-speech-recognition",
-        model=model,
-        tokenizer=processor.tokenizer,
-        feature_extractor=processor.feature_extractor,
-        batch_size=16,
-        return_timestamps=True,
-        dtype=torch_dtype,
-        device=0 if device == "cuda" else -1,
-        generate_kwargs=generate_kwargs
-    )
 
     print("[i] Loading full audio for slicing...")
-    # Use torchaudio for consistency since we have the environment for it
-    full_audio_tensor, sr = torchaudio.load(audio_path)
+    audio_cleaner = AudioProcessingProfiles(sample_rate=16000)
+    full_audio_np, sr = audio_cleaner.process_for_whisper(
+        audio_path,
+        use_processing=False,
+        use_clearvoice=False,
+        aggressive_cleaning=False,
+    )
 
-    # Mix to mono if needed
-    if full_audio_tensor.shape[0] > 1:
-        full_audio_tensor = full_audio_tensor.mean(dim=0)
-    else:
-        full_audio_tensor = full_audio_tensor.squeeze()
-
-    # Convert to numpy for Whisper pipeline
-    full_audio_np = full_audio_tensor.numpy()
 
     final_results = []
 
@@ -250,7 +266,7 @@ def transcribe_segments(audio_path, segments, model_id, language, device, progre
         end = seg["end"]
         spk = seg["speaker"]
 
-        pad = 0.25
+        pad = 0.05
         start_sample = int(max(0, (start - pad) * sr))
         end_sample = int(min(len(full_audio_np), (end + pad) * sr))
 
@@ -259,8 +275,15 @@ def transcribe_segments(audio_path, segments, model_id, language, device, progre
         if len(audio_cut) < ((pad * 3) * sr): continue
 
         try:
-            result = asr_pipe(audio_cut, generate_kwargs=generate_kwargs)
-            text = result.get("text", "").strip()
+            #result = asr_pipe(audio_cut, generate_kwargs=generate_kwargs)
+            #------New pipe-----
+            inputs = whisper_processor(audio_cut, sampling_rate=sr, return_tensors="pt", return_attention_mask=True,)
+            inputs = inputs.to(device, dtype=torch_dtype)
+
+            gen_ids = model.generate(**inputs, **generate_kwargs)
+            result = whisper_processor.batch_decode(gen_ids, output_offsets=True)
+
+            text = result[0].get("text", "").strip()
             if text:
                 final_results.append({
                     "start": start, "end": end, "speaker": spk, "text": text
@@ -273,51 +296,113 @@ def transcribe_segments(audio_path, segments, model_id, language, device, progre
             else:
                 print(f"[!] Failed segment {i}: {e}")
 
-    del asr_pipe, model, processor, full_audio_tensor, full_audio_np
+    audio_cleaner.cleanup_temp_files()
+    del model, audio_cleaner, whisper_processor, full_audio_np #, asr_pipe
     cleanup_vram()
-
     final_results.sort(key=lambda x: x["start"])
     return final_results
 
+
+def _resolve_ffmpeg_exe(ffmpeg_path: str | None = None) -> str:
+    """
+    Resolve ffmpeg executable to use.
+
+    Priority:
+      1) explicit function arg
+      2) VOCALTRACE_FFMPEG / FFMPEG_PATH env var
+      3) shutil.which("ffmpeg")
+
+    We intentionally prefer a *system* ffmpeg (not conda ffmpeg libs).
+    """
+    exe = ffmpeg_path or os.environ.get("VOCALTRACE_FFMPEG") or os.environ.get("FFMPEG_PATH") or shutil.which("ffmpeg")
+    if not exe:
+        raise RuntimeError(
+            "ffmpeg executable not found. Install ffmpeg (system) or set VOCALTRACE_FFMPEG / FFMPEG_PATH."
+        )
+    return exe
+
+def load_audio_via_ffmpeg(
+    path: str,
+    target_sr: int = 16000,
+    mono: bool = True,
+    ffmpeg_path: str | None = None,
+) -> dict:
+    """
+    Decode audio using the system ffmpeg executable into a Pyannote-compatible dict:
+      {"waveform": torch.Tensor [channels, time], "sample_rate": int}
+
+    - Uses ffmpeg CLI (NOT Conda ffmpeg libs)
+    - Decodes to float32 PCM (f32le)
+    """
+    exe = _resolve_ffmpeg_exe(ffmpeg_path)
+
+    cmd = [
+        exe,
+        "-nostdin",
+        "-hide_banner",
+        "-loglevel", "error",
+        "-i", path,
+        "-ar", str(target_sr),
+    ]
+
+    if mono:
+        cmd += ["-ac", "1"]
+
+    cmd += ["-f", "f32le", "pipe:1"]
+
+    proc = subprocess.run(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+    if proc.returncode != 0:
+        err = proc.stderr.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(f"ffmpeg decode failed (code {proc.returncode}): {err}")
+
+    audio = np.frombuffer(proc.stdout, dtype=np.float32)
+    audio = np.ascontiguousarray(audio, dtype=np.float32)  # contiguous + usually writable
+    if not audio.flags.writeable:
+        audio = audio.copy()
+    # Shape to [channels, time]
+    if mono:
+        waveform = torch.from_numpy(audio).unsqueeze(0)  # [1, T]
+    else:
+        # If not mono, we'd need to know channel count. Since we're decoding raw PCM,
+        # we'd have to decode with a known -ac N. In practice, keep mono for diarization.
+        waveform = torch.from_numpy(audio).unsqueeze(0)
+
+    return {"waveform": waveform, "sample_rate": target_sr}
+
+def decode_audio(path: str) -> torch.Tensor:
+    try:
+        #wav, sr = torchaudio.load_with_torchcodec(path)
+        audio_dict = load_audio_via_ffmpeg(path)
+    except Exception as e:
+        raise RuntimeError(f"Failed to decode audio via ffmpeg: {e}") from e
+
+    wav = audio_dict["waveform"]
+    sr = audio_dict["sample_rate"]
+    if sr != 16000:
+        wav = torchaudio.functional.resample(wav, sr, 16000)
+    if wav.shape[0] > 1:
+        wav = wav.mean(dim=0, keepdim=True)
+    return wav
 
 def detect_language_from_audio(audio_path: str) -> str:
     """
     Detect language using native torchaudio + whisper-tiny.
     """
     try:
-        # Load ~10s from middle
-        # Note: torchaudio.load doesn't support 'start/stop' efficiently without seeking,
-        # but loading the whole file is robust.
-        # For huge files, we might want frame_offset/num_frames args, but requires metadata first.
-        # Let's just load, it's safer on Windows with ffmpeg.
-        wav, sr = torchaudio.load(audio_path)
-
+        waveform = decode_audio(audio_path)
         # Crop 30s max
-        if wav.shape[1] > sr * 30:
-            mid = wav.shape[1] // 2
-            wav = wav[:, mid:mid + (sr * 30)]
+        sr = 16000
+        if waveform.shape[1] > sr * 30:
+            mid = waveform.shape[1] // 2
+            waveform = waveform[:, mid:mid + (sr * 30)]
 
-        # Mono
-        if wav.shape[0] > 1:
-            wav = wav.mean(dim=0)
-        else:
-            wav = wav.squeeze()
-
-        # Resample to 16k for Whisper
-        if sr != 16000:
-            resampler = torchaudio.transforms.Resample(orig_freq=sr, new_freq=16000)
-            wav = resampler(wav)
-
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        asr = pipeline(
-            "automatic-speech-recognition",
-            model="openai/whisper-tiny",
-            device=0 if device == "cuda" else -1,
-        )
-
-        result = asr(wav.numpy(), generate_kwargs={"task": "transcribe"})
-        text = (result.get("text") or "").strip()
-
+        result = whisper_infer(waveform, sr, "openai/whisper-tiny")
+        text = (result[0].get("text") or "").strip()
         if not text: return "unknown"
 
         lang = detect(text)
@@ -329,6 +414,68 @@ def detect_language_from_audio(audio_path: str) -> str:
         print(f"[!] Language detection failed: {e}")
         return "unknown"
 
+
+#def whisper_infer(waveform, model_id="openai/whisper-large-v3", task="transcribe"):
+def whisper_infer(waveform, sr, model_id="openai/whisper-large-v3", task="transcribe"):
+
+    """Return (text, unit_embedding) for a 16‑kHz mono waveform."""
+    device = "cuda:0" if torch.cuda.is_available() else "cpu"
+    torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+
+    try:
+        model = AutoModelForSpeechSeq2Seq.from_pretrained(
+            model_id,
+            dtype=torch_dtype,
+            low_cpu_mem_usage=True,
+            use_safetensors=True,
+            attn_implementation="flash_attention_2",
+        ).to(device)
+    except Exception as e:
+        log.warning("flash_attention_2 unavailable; falling back to eager attention (%s)", e)
+        model = AutoModelForSpeechSeq2Seq.from_pretrained(
+            model_id,
+            dtype=torch_dtype,
+            low_cpu_mem_usage=True,
+            use_safetensors=True,
+            attn_implementation="eager",
+        ).to(device)
+
+    processor = AutoProcessor.from_pretrained(model_id) # feature_extraction_whisper
+
+    mono_wave = waveform.squeeze()
+
+    # feature_extraction_whisper extraction options (transformers.models.whisper.feature_extraction_whisper.WhisperFeatureExtractor))
+    inputs = processor(
+        mono_wave,
+        sampling_rate=sr,
+        return_tensors="pt",
+        #truncation=False,
+        #padding="longest",
+        return_attention_mask=True,
+        do_normalize=True, #Try it out (don't know if it makes things better)
+        #device="cuda" if torch.cuda.is_available() else "cpu"
+    )
+    inputs = inputs.to(device, dtype=torch_dtype)
+
+    #whisper model generation parameters (transformers.models.whisper.generation_whisper.WhisperGenerationMixin.generate)
+    generate_kwargs = {
+        "task": task, # (In my opinion transcribing should always be done. Translation can be done POST hock, for user convenience.)
+        "num_beams": 2,
+        "condition_on_prev_tokens": False,
+        "compression_ratio_threshold": 1.35,  # zlib compression ratio threshold (in token space)
+        "temperature": (0.0, 0.2, 0.4, 0.6, 0.8, 1.0),
+        "logprob_threshold": -1.0,
+        "no_speech_threshold": 0.6,
+        "return_timestamps" : True,
+        #"return_token_timestamps" : True,   #-Whether to return token-level timestamps with the text. This can be used with or without the `return_timestamps` option. To get word-level timestamps, use the tokenizer to group the tokens into words.
+        "monitor_progress" : my_generation_monitor_func,
+    }
+    gen_ids = model.generate(**inputs, **generate_kwargs)
+    decoded  = processor.batch_decode(gen_ids, output_offsets=True)
+    return decoded
+
+def my_generation_monitor_func(p_tens):
+    log.debug("Generation monitor hook invoked")
 
 def apply_fingerprinting(audio_path, segments, fingerprint_source, hf_token, strategy="cluster"):
     """
@@ -460,8 +607,7 @@ def main():
             model_id = "openai/whisper-large-v3"
 
     if not args.hf_token:
-        print("[!] Error: HF_TOKEN required.")
-        sys.exit(1)
+        raise ValueError("HF_TOKEN required (pass --hf_token or set HF_TOKEN env var).")
 
     base_name = args.out or os.path.splitext(os.path.basename(args.audio))[0]
     device = "cuda" if torch.cuda.is_available() else "cpu"

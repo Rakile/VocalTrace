@@ -35,14 +35,17 @@ def transcribe_audio_to_text(
         language: str = "auto",
         model_id: Optional[str] = "auto",
         hf_token: Optional[str] = None,
-        gap: float = 4.0,
+        gap: float = 2.0,
         names: Optional[str] = None,
         device: Optional[str] = None,
         fingerprints_path: Optional[str] = None,
         fingerprints_dict: Optional[Dict] = None, # NEW argument
         id_strategy: str = "cluster",
+        diarization_model: str = "unknown",
+        transcription_model: str = "auto",
         progress_callback: Optional[Callable[[int, int], None]] = None,
-        verified_segments: List[Dict] = None,
+        verified_segments: Optional[List[Dict]] = None,
+        **kwargs
 ) -> Dict[str, Any]:
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -54,10 +57,13 @@ def transcribe_audio_to_text(
     if language == "auto":
         language = normalize_language(detect_language_from_audio(audio_path), model_id)
 
-    if language.startswith("sv"):
-        model_id = "KBLab/kb-whisper-large"
+    if transcription_model == "auto":
+        if language.startswith("sv"):
+            model_id = "KBLab/kb-whisper-large"
+        else:
+            model_id = "openai/whisper-large-v3"
     else:
-        model_id = "openai/whisper-large-v3"
+        model_id = transcription_model
 
     # 1. Diarization
     raw_segments = run_diarization(audio_path, num_speakers, hf_token)
@@ -86,7 +92,8 @@ def transcribe_audio_to_text(
 
     # 5. Transcribe (skips verified text)
     final_items = transcribe_segments(
-        audio_path, merged_segments, model_id, language, device, progress_callback
+        audio_path, merged_segments, model_id, language, device,
+        progress_callback=progress_callback,
     )
 
     # 6. Format

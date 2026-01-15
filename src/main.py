@@ -1,8 +1,5 @@
 import sys
 import os
-# --- EXECUTE DLL FIX FIRST ---
-import bootstrap
-# -----------------------------
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PySide6.QtCore import QThread, Signal, QObject, Qt, QUrl
 from PySide6.QtWidgets import (
@@ -29,6 +26,7 @@ from pipeline_manager import (
 from analysis_engine import (
     call_llm_openai,
     call_llm_gemini_25_pro,
+    call_llm_lmstudio
 )
 
 
@@ -76,6 +74,8 @@ def fmt_ms(ms):
 def _pick_backend(name: str) -> Callable[[str, str], str]:
     if "gemini" in name.lower():
         return call_llm_gemini_25_pro
+    elif "lmstudio" in name.lower():
+            return call_llm_lmstudio
     else:
         return call_llm_openai
 
@@ -83,6 +83,7 @@ def _pick_backend(name: str) -> Callable[[str, str], str]:
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+        #os.environ["PYANNOTE_METRICS_ENABLED"] = "false"
         self.setWindowTitle("VocalTrace - The Conversation Analyzer")
         self.resize(1200, 900)
 
@@ -101,7 +102,7 @@ class MainWindow(QMainWindow):
         self.btn_audio.clicked.connect(self.choose_audio_file)
         top_files.addWidget(self.audio_label, 3)
         top_files.addWidget(self.btn_audio, 1)
-
+        self._original_audio_path = None
         # ------------------------------------------------------------------ #
         # 2. Fingerprints & Strategy
         # ------------------------------------------------------------------ #
@@ -126,6 +127,43 @@ class MainWindow(QMainWindow):
         top_fingerprints.addWidget(self.combo_id_strategy)
         top_fingerprints.addWidget(self.btn_open_voices)
         top_fingerprints.addStretch()
+
+        # ------------------------------------------------------------------ #
+        # 2.5. Diarization Model and Transcription Model
+        # ------------------------------------------------------------------ #
+        top_diarization_transcription_model = QHBoxLayout(); root.addLayout(top_diarization_transcription_model)
+
+        self.diarization_model_label = QLabel("Diarization Model:")
+        self.diarization_model_label.setStyleSheet("font-weight: bold;")
+        self.combo_diarization_model = QComboBox()
+        self.combo_diarization_model.addItems([
+            "pyannote/speaker-diarization-community-1",
+            "pyannote/speaker-diarization-3.1",
+        ])
+        self.combo_diarization_model.setToolTip(
+            "Which Pyannote diarization model to use."
+        )
+
+        self.transcription_model_label = QLabel("Transcription Model:")
+        self.transcription_model_label.setStyleSheet("font-weight: bold;")
+        self.combo_transcription_model = QComboBox()
+        self.combo_transcription_model.addItems([
+            "auto",
+            "openai/whisper-large-v3",
+            "openai/whisper-large-v3-turbo",
+            "openai/whisper-tiny",
+            "KBLab/kb-whisper-large",
+        ])
+        self.combo_transcription_model.setToolTip(
+            "Which Whisper transcription model to use."
+        )
+
+
+        top_diarization_transcription_model.addWidget(self.diarization_model_label)
+        top_diarization_transcription_model.addWidget(self.combo_diarization_model)
+        top_diarization_transcription_model.addWidget(self.transcription_model_label)
+        top_diarization_transcription_model.addWidget(self.combo_transcription_model)
+        top_diarization_transcription_model.addStretch(1)
 
         # ------------------------------------------------------------------ #
         # 3. Transcript File
@@ -154,7 +192,8 @@ class MainWindow(QMainWindow):
             "gemini-2.5-pro",
             "gpt-4o",
             "gpt-4-turbo",
-            "gpt-5.1"
+            "gpt-5.1",
+            "LMStudio/gpt-oss-20b"
         ])
         self.mode_combo = QComboBox()
         self.mode_combo.addItems([
@@ -186,6 +225,57 @@ class MainWindow(QMainWindow):
         options.addWidget(self.save_btn)
         options.addWidget(self.run_btn)
 
+
+        # ------------------------------------------------------------------ #
+        # 4.5 Audio Cleaning Options
+        # ------------------------------------------------------------------ #
+        self.clean_group = QGroupBox("Audio Cleaning (optional)")
+        clean_layout = QHBoxLayout()
+        self.clean_group.setLayout(clean_layout)
+
+        self.chk_clean_transcription = QCheckBox("Enable cleaning for transcription")
+        self.chk_clean_transcription.setChecked(False)
+        self.chk_clean_transcription.setToolTip(
+            "If enabled, VocalTrace will preprocess audio before ASR.\n"
+            "Disable this to run raw audio through the ASR model (good for debugging)."
+        )
+
+        self.combo_clean_level = QComboBox()
+        self.combo_clean_level.addItems(["Light", "Aggressive"])
+        self.combo_clean_level.setCurrentText("Light")
+        self.combo_clean_level.setToolTip(
+            "Light: gentle denoise (recommended default)\n"
+            "Aggressive: stronger denoise + higher risk of artifacts"
+        )
+
+        self.chk_use_clearvoice = QCheckBox("Use ClearVoice (AI)")
+        self.chk_use_clearvoice.setChecked(False)
+        self.chk_use_clearvoice.setToolTip(
+            "Optional deep-learning enhancement via ClearVoice.\n"
+            "Only works if the clearvoice package is installed."
+        )
+
+        self.chk_clean_diarization = QCheckBox("Light cleaning for diarization")
+        self.chk_clean_diarization.setChecked(False)
+        self.chk_clean_diarization.setToolTip(
+            "Optional light preprocessing before diarization.\n"
+            "May help in very noisy files, but can also alter speaker characteristics."
+        )
+
+        clean_layout.addWidget(self.chk_clean_transcription)
+        clean_layout.addWidget(QLabel("Level:"))
+        clean_layout.addWidget(self.combo_clean_level)
+        clean_layout.addWidget(self.chk_use_clearvoice)
+        clean_layout.addWidget(self.chk_clean_diarization)
+
+        self.btn_denoise_now = QPushButton("Clean Audio Now")
+        self.btn_denoise_now.clicked.connect(self.run_denoise_process)
+        self.btn_denoise_now.setStyleSheet("background-color: #e6f3ff; font-weight: bold;")
+        clean_layout.addWidget(self.btn_denoise_now)
+
+        clean_layout.addStretch(1)
+
+        root.addWidget(self.clean_group)
         # Progress Bar Row
         prog_row = QHBoxLayout()
         prog_row.addWidget(self.progress_bar)
@@ -308,14 +398,51 @@ class MainWindow(QMainWindow):
         )
         if path:
             self._audio_path = path
-            self.audio_label.setText(os.path.basename(path))
+            self._original_audio_path = path
+            self.audio_label.setText(f"🎧 ORIGINAL: {os.path.basename(path)}")
             self._input_mode = "audio"
+            self.clear_verified_segments()
             self.voice_tab.set_current_audio(path)
 
             # Init Player
             self.player.setSource(QUrl.fromLocalFile(path))
             self.btn_play.setEnabled(True)
             self.player_group.setTitle(f"Player: {os.path.basename(path)}")
+
+    def run_denoise_process(self):
+        if not self._audio_path:
+            QMessageBox.warning(self, "No Audio", "Please open an audio file first.")
+            return
+
+        self._set_running(True)  # Disables all buttons as you intended
+        self.progress_bar.setRange(0, 0)  # Pulsing progress
+
+        level = self.combo_clean_level.currentText()
+        use_cv = self.chk_use_clearvoice.isChecked()
+
+        self.denoise_worker = DenoiseWorker(self._audio_path, level, use_cv)
+        self.denoise_worker.finished.connect(self.on_denoise_finished)
+        self.denoise_worker.error.connect(self.on_denoise_error)
+        self.denoise_worker.start()
+
+    def on_denoise_finished(self, cleaned_path):
+        self._set_running(False)
+        self.progress_bar.setRange(0, 100)
+
+        # THE SWITCH:
+        self._audio_path = cleaned_path
+        self.audio_label.setText(f"🎧 ORIGINAL {os.path.basename(self._original_audio_path)} → ✨ CLEANED: {os.path.basename(cleaned_path)}")
+        self.audio_label.setStyleSheet("color: green; font-weight: bold;")
+
+        # Update all dependent components
+        self.player.setSource(QUrl.fromLocalFile(cleaned_path))
+        self.voice_tab.set_current_audio(cleaned_path)
+
+        QMessageBox.information(self, "Success", "Audio cleaned and set as primary source.")
+
+    def on_denoise_error(self, err):
+        self._set_running(False)
+        QMessageBox.critical(self, "Denoise Error", err)
 
     def toggle_playback(self):
         if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
@@ -399,6 +526,14 @@ class MainWindow(QMainWindow):
             else:
                 self.player.pause()
 
+    def set_verified_segments(self, segs: list[dict]):
+        self.verified_segments = segs or []
+        self.update_json_tab_with_verified()
+        self.auto_save_sidecar()
+
+    def clear_verified_segments(self):
+        self.set_verified_segments([])
+
     # ------------------------------------------------------------------ #
     # VERIFIED SEGMENTS & EDITING LOGIC
     # ------------------------------------------------------------------ #
@@ -436,7 +571,82 @@ class MainWindow(QMainWindow):
         else:
             self.transcript_edit.append(new_block)
 
-        self.mark_selection_verified(new_block, silent=True)
+        #self.mark_selection_verified(new_block, silent=True)
+        self.toggle_selection_verified(new_block, silent=True)
+
+
+    def toggle_selection_verified(self, text_block: str, silent: bool = False):
+        """
+        Toggle ground-truth status for the selected transcript lines.
+        - If a segment already exists in verified_segments -> remove it (unverify)
+        - Else -> add it (verify)
+        """
+        lines = text_block.strip().split('\n')
+        pattern = r"^\[(\d{2}:\d{2}:\d{2}(?:\.\d+)?)\]-\[(\d{2}:\d{2}:\d{2}(?:\.\d+)?)\]\s+(.*?):\s+(.*)$"
+
+        added = 0
+        removed = 0
+        tol = 0.05  # seconds tolerance for float comparisons
+
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+
+            m = re.search(pattern, line)
+            if not m:
+                continue
+
+            start_str, end_str, speaker, text = m.groups()
+            start_sec = timestamp_to_seconds(start_str)
+            end_sec = timestamp_to_seconds(end_str)
+
+            # Find "same" segment in existing verified list
+            match_idx = None
+            for i, s in enumerate(self.verified_segments):
+                if (
+                        abs(s.get("start", -1) - start_sec) <= tol and
+                        abs(s.get("end", -1) - end_sec) <= tol and
+                        s.get("speaker") == speaker
+                ):
+                    match_idx = i
+                    break
+
+            if match_idx is not None:
+                self.verified_segments.pop(match_idx)
+                removed += 1
+            else:
+                # Remove overlaps to avoid duplicates/clashes
+                self.verified_segments = [
+                    s for s in self.verified_segments
+                    if not (s["start"] < end_sec and s["end"] > start_sec)
+                ]
+                self.verified_segments.append({
+                    "start": start_sec,
+                    "end": end_sec,
+                    "speaker": speaker,
+                    "text": text,
+                    "is_verified": True
+                })
+                added += 1
+
+        if added or removed:
+            self.update_json_tab_with_verified()
+            self.auto_save_sidecar()
+            if not silent:
+                QMessageBox.information(
+                    self,
+                    "Ground Truth Updated",
+                    f"✅ Verified: {added}\n↩️ Unverified: {removed}"
+                )
+        elif not silent:
+            QMessageBox.warning(
+                self,
+                "Error",
+                "Could not parse selection. Format must be:\n"
+                "[00:00:00]-[00:00:00] Speaker: Text"
+            )
+
 
     def mark_selection_verified(self, text_block, silent=False):
         """
@@ -497,6 +707,140 @@ class MainWindow(QMainWindow):
         except Exception as e:
             print(f"Failed to auto-save sidecar: {e}")
 
+    def verify_selection(self, text_block: str, silent: bool = False):
+        # “Set to verified” (verified stay verified; unverified become verified)
+        self._set_selection_verified(text_block, make_verified=True, silent=silent)
+
+    def unverify_selection(self, text_block: str, silent: bool = False):
+        # “Set to unverified” (verified removed; unverified stay unverified)
+        self._set_selection_verified(text_block, make_verified=False, silent=silent)
+
+    def _set_selection_verified(self, text_block: str, make_verified: bool, silent: bool = False):
+        lines = [ln.strip() for ln in text_block.strip().split("\n") if ln.strip()]
+        pattern = r"^\[(\d{2}:\d{2}:\d{2}(?:\.\d+)?)\]-\[(\d{2}:\d{2}:\d{2}(?:\.\d+)?)\]\s+(.*?):\s+(.*)$"
+        tol = 0.05
+
+        changed = 0
+
+        for line in lines:
+            m = re.search(pattern, line)
+            if not m:
+                continue
+
+            start_str, end_str, speaker, text = m.groups()
+            start_sec = timestamp_to_seconds(start_str)
+            end_sec = timestamp_to_seconds(end_str)
+
+            # find existing match
+            match_idx = None
+            for i, s in enumerate(self.verified_segments):
+                if (
+                        abs(s.get("start", -1) - start_sec) <= tol and
+                        abs(s.get("end", -1) - end_sec) <= tol and
+                        s.get("speaker") == speaker
+                ):
+                    match_idx = i
+                    break
+
+            if make_verified:
+                if match_idx is None:
+                    # remove overlaps to avoid duplicates/clashes
+                    self.verified_segments = [
+                        s for s in self.verified_segments
+                        if not (s["start"] < end_sec and s["end"] > start_sec)
+                    ]
+                    self.verified_segments.append({
+                        "start": start_sec,
+                        "end": end_sec,
+                        "speaker": speaker,
+                        "text": text,
+                        "is_verified": True
+                    })
+                    changed += 1
+            else:
+                if match_idx is not None:
+                    self.verified_segments.pop(match_idx)
+                    changed += 1
+
+        if changed:
+            self.update_json_tab_with_verified()
+            self.auto_save_sidecar()
+            if not silent:
+                QMessageBox.information(
+                    self,
+                    "Ground Truth Updated",
+                    f"{'✅ Verified' if make_verified else '↩️ Unverified'}: {changed}"
+                )
+        elif not silent:
+            pass
+            #QMessageBox.information(self, "No changes", "Selection was already in the requested state.")
+
+    def _iter_selected_segments(self, text_block: str):
+        """
+        Yields parsed segments from a selected transcript block.
+        Only yields lines that match the expected format.
+        """
+        lines = [ln.strip() for ln in text_block.strip().split("\n") if ln.strip()]
+        pattern = r"^\[(\d{2}:\d{2}:\d{2}(?:\.\d+)?)\]-\[(\d{2}:\d{2}:\d{2}(?:\.\d+)?)\]\s+(.*?):\s+(.*)$"
+
+        for line in lines:
+            m = re.search(pattern, line)
+            if not m:
+                continue
+            start_str, end_str, speaker, text = m.groups()
+            yield (timestamp_to_seconds(start_str), timestamp_to_seconds(end_str), speaker.strip(), text)
+
+    def selection_verification_state(self, text_block: str) -> str:
+        """
+        Returns: "none" | "all" | "mixed"
+        Robust: uses the same parsing rules as verify/unverify and
+        does NOT misclassify mixed selections when some lines fail to parse.
+        """
+        tol = 0.05
+
+        parsed = list(self._iter_selected_segments(text_block))
+        if not parsed:
+            return "none"
+
+        def is_verified(seg) -> bool:
+            start_sec, end_sec, speaker, _text = seg
+            # Match by time; speaker is optional for state purposes (less surprising UX)
+            for s in self.verified_segments:
+                if (
+                        abs(s.get("start", -1) - start_sec) <= tol and
+                        abs(s.get("end", -1) - end_sec) <= tol
+                ):
+                    return True
+            return False
+
+        flags = [is_verified(seg) for seg in parsed]
+        if all(flags):
+            return "all"
+        if any(flags):
+            return "mixed"
+        return "none"
+
+    def selection_looks_verified(self, text_block: str) -> bool:
+        pattern = r"^\[(\d{2}:\d{2}:\d{2}(?:\.\d+)?)\]-\[(\d{2}:\d{2}:\d{2}(?:\.\d+)?)\]\s+(.*?):\s+"
+        tol = 0.05
+
+        for line in text_block.strip().split("\n"):
+            m = re.search(pattern, line.strip())
+            if not m:
+                continue
+            start_sec = timestamp_to_seconds(m.group(1))
+            end_sec = timestamp_to_seconds(m.group(2))
+            speaker = m.group(3)
+
+            for s in self.verified_segments:
+                if (
+                        abs(s.get("start", -1) - start_sec) <= tol and
+                        abs(s.get("end", -1) - end_sec) <= tol and
+                        s.get("speaker") == speaker
+                ):
+                    return True
+        return False
+
     # ------------------------------------------------------------------ #
     # CONTEXT MENU
     # ------------------------------------------------------------------ #
@@ -535,9 +879,14 @@ class MainWindow(QMainWindow):
 
         # Extraction
         selected_text = final_cursor.selectedText().replace('\u2029', '\n').replace('\u2028', '\n')
+
+        # Determine if selection is parseable for verify/unverify
+        parsed = list(self._iter_selected_segments(selected_text))
+        has_parsed_segments = bool(parsed)
+
+        # Derive "times" for Snipper (your existing logic)
         ts_pattern = r"\[(\d{2}:\d{2}:\d{2}(?:\.\d+)?)\]"
         speaker_pattern = r"\]\s+(.*?):\s"
-
         all_times = re.findall(ts_pattern, selected_text)
         times = None
 
@@ -559,15 +908,27 @@ class MainWindow(QMainWindow):
         menu = self.transcript_edit.createStandardContextMenu()
         menu.addSeparator()
 
-        action_verify = menu.addAction("✅ Mark Selection as Verified")
+        state = self.selection_verification_state(selected_text)
+
+        action_verify = None
+        action_unverify = None
+
+        if state == "none":
+            action_verify = menu.addAction("✅ Verify selection")
+        elif state == "all":
+            action_unverify = menu.addAction("↩️ Unverify selection")
+        else:  # mixed
+            action_verify = menu.addAction("✅ Verify selected (set all)")
+            action_unverify = menu.addAction("↩️ Unverify selected (set all)")
+
         action_snip = menu.addAction("✂️ Refine / Split / Merge in Snipper")
 
-        if times:
-            action_snip.setEnabled(True)
-            action_verify.setEnabled(True)
-        else:
-            action_snip.setEnabled(False)
-            action_verify.setEnabled(False)
+        # Enable/disable actions
+        action_snip.setEnabled(bool(times))
+        if action_verify is not None:
+            action_verify.setEnabled(has_parsed_segments)
+        if action_unverify is not None:
+            action_unverify.setEnabled(has_parsed_segments)
 
         action = menu.exec(self.transcript_edit.mapToGlobal(pos))
 
@@ -577,7 +938,10 @@ class MainWindow(QMainWindow):
             self.voice_tab.open_snipper_at_range(start_s, end_s, initial_text=text_content, initial_speaker=spk)
 
         elif action == action_verify:
-            self.mark_selection_verified(selected_text, silent=False)
+            self.verify_selection(selected_text, silent=False)
+
+        elif action == action_unverify:
+            self.unverify_selection(selected_text, silent=False)
 
     # ------------------------------------------------------------------ #
     # PIPELINE & STANDARD LOGIC
@@ -641,12 +1005,9 @@ class MainWindow(QMainWindow):
         if json_data:
             print(f"[GUI] Loaded sidecar: {result['json_path']}")
 
-            # Load Verified Segments
-            if "verified_segments" in json_data:
-                self.verified_segments = json_data["verified_segments"]
-                print(f"[GUI] Loaded {len(self.verified_segments)} verified segments.")
-            else:
-                self.verified_segments = []
+            # Load Verified Segments (canonical)
+            self.set_verified_segments(json_data.get("verified_segments", []))
+            print(f"[GUI] Loaded {len(self.verified_segments)} verified segments.")
 
             try:
                 pretty = json.dumps(json_data, ensure_ascii=False, indent=2)
@@ -663,7 +1024,7 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 print(f"[GUI] Error processing JSON data: {e}")
         else:
-            self.verified_segments = []
+            self.set_verified_segments([])
 
         self.chat_tab.load_transcript(text, path=path, has_analysis=analysis_found)
         if persona_to_set:
@@ -703,11 +1064,12 @@ class MainWindow(QMainWindow):
         self.run_btn.setEnabled(not running)
         self.run_btn.setText("Running…" if running else "Run analysis")
         self.save_btn.setEnabled(False if running else bool(self.transcript_edit.toPlainText().strip()))
-        for w in [self.btn_audio, self.btn_transcript, self.combo_id_strategy, self.btn_open_voices, self.lang_combo, self.backend_combo, self.mode_combo, self.tabs]:
+        for w in [self.btn_audio, self.btn_transcript, self.combo_id_strategy, self.combo_diarization_model, self.combo_transcription_model, self.btn_open_voices, self.lang_combo, self.backend_combo, self.mode_combo, self.tabs, self.btn_denoise_now]:
             w.setEnabled(not running)
 
     def _do_analyze_transcript(self, transcript: str, analysis_language: str, call_llm, backend_label: str):
         self._set_running(True)
+        self.progress_bar.setValue(0)
 
         def job(progress_callback=None):
             return analyze_transcript(
@@ -721,9 +1083,10 @@ class MainWindow(QMainWindow):
 
         def on_finished(out: dict):
             self._current_worker = None
-            self.progress_bar.setValue(100)
+            self.progress_bar.setValue(0)
             self._populate_outputs(transcript, out)
             self._set_running(False)
+            self._handle_progress(0)
             self.auto_save_sidecar()
 
         worker.finished.connect(on_finished)
@@ -742,6 +1105,12 @@ class MainWindow(QMainWindow):
         strat_text = self.combo_id_strategy.currentText()
         strategy = "brute" if "Brute" in strat_text else "cluster"
 
+        diarization_model_text = self.combo_diarization_model.currentText()
+        transcription_model_text = self.combo_transcription_model.currentText()
+
+        #strategy = "brute" if "Brute" in strat_text else "cluster"
+
+
         def job(progress_callback=None):
             return transcribe_audio_to_text(
                 self._audio_path,
@@ -750,6 +1119,8 @@ class MainWindow(QMainWindow):
                 fingerprints_dict=active_voices,  # Pass DICT now
                 fingerprints_path=None,
                 id_strategy=strategy,
+                diarization_model= diarization_model_text,
+                transcription_model=transcription_model_text,
                 progress_callback=progress_callback,
                 verified_segments=self.verified_segments  # Pass Truth
             )
@@ -776,6 +1147,7 @@ class MainWindow(QMainWindow):
             self.raw_json_edit.setPlainText(pretty)
             self.summary_edit.setPlainText("Audio-only transcription mode.")
             self._set_running(False)
+            self._handle_progress(0)
 
         worker.finished.connect(on_finished)
         worker.error.connect(lambda msg: (self._set_running(False), QMessageBox.critical(self, "Error", msg)))
@@ -793,19 +1165,24 @@ class MainWindow(QMainWindow):
         strat_text = self.combo_id_strategy.currentText()
         strategy = "brute" if "Brute" in strat_text else "cluster"
 
+        diarization_model_text = self.combo_diarization_model.currentText()
+        transcription_model_text = self.combo_transcription_model.currentText()
+
         def job(progress_callback=None):
             return run_full_pipeline(
                 self._audio_path,
                 call_llm=call_llm,
-                asr_language=language,
-                analysis_language=language,
+                language=language,
+                #analysis_language=language,
                 hf_token=os.getenv("HF_TOKEN_TRANSCRIBE"),
                 backend=backend_label,
-                fingerprints_dict=active_voices,  # Pass DICT now
+                fingerprints_dict=active_voices,
                 fingerprints_path=None,
                 id_strategy=strategy,
+                diarization_model=diarization_model_text,
+                transcription_model=transcription_model_text,
                 progress_callback=progress_callback,
-                verified_segments=self.verified_segments  # Pass Truth
+                verified_segments=self.verified_segments,
             )
 
         worker = Worker(job)
@@ -814,9 +1191,10 @@ class MainWindow(QMainWindow):
 
         def on_finished(out: dict):
             self._current_worker = None
-            self.progress_bar.setValue(100)
+            self.progress_bar.setValue(0)
             self._populate_outputs(out["transcript"], out["analysis"])
             self._set_running(False)
+            self._handle_progress(0)
             self.auto_save_sidecar()
 
         worker.finished.connect(on_finished)
@@ -884,6 +1262,44 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 QMessageBox.critical(self, "Error", str(e))
 
+
+class DenoiseWorker(QThread):
+    finished = Signal(str)  # Returns the path to the cleaned file
+    error = Signal(str)
+    progress = Signal(int)
+
+    def __init__(self, audio_path, profile_level="Light", use_clearvoice=False):
+        super().__init__()
+        self.audio_path = audio_path
+        self.profile_level = profile_level
+        self.use_clearvoice = use_clearvoice
+
+    def run(self):
+        try:
+            from audio_processing_profiles import AudioProcessingProfiles
+            # We don't use a 'temp' directory here because we want this file
+            # to persist for the duration of the user's session.
+            processor = AudioProcessingProfiles()
+
+            # Use the Whisper profile logic as it's the most aggressive/clean
+            # but we return the path to the file on disk.
+            cleaned_np, sr = processor.process_for_whisper(
+                self.audio_path,
+                use_processing=True,
+                use_clearvoice=self.use_clearvoice,
+                aggressive_cleaning=(self.profile_level == "Aggressive")
+            )
+
+            # Save the result as a 'sidecar' cleaned file
+            base, _ = os.path.splitext(self.audio_path)
+            out_path = f"{base}_cleaned.wav"
+
+            import soundfile as sf
+            sf.write(out_path, cleaned_np, sr)
+
+            self.finished.emit(out_path)
+        except Exception as e:
+            self.error.emit(str(e))
 
 class FileLoaderWorker(QThread):
     finished = Signal(dict)

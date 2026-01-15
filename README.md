@@ -2,37 +2,24 @@
   <img src="assets/banner.png" width="600">
 </p>
 
-### **Forensic-Grade Conversation Analyzer & Speaker Identity Workbench**
-### ⚡ Quick Start
-```bash
-# 1. Clone
-git clone https://github.com/Rakile/VocalTrace.git
-cd VocalTrace
+# VocalTrace v0.3
 
-# 2. Create environment (conda)
-conda create -n vocaltrace python=3.12
-conda activate vocaltrace
+**Forensic-grade conversation analyzer & speaker identity workbench** VocalTrace is a GUI-driven tool designed for investigators and researchers to transform raw audio into verified, searchable intelligence. It combines state-of-the-art diarization (Pyannote) and transcription (Whisper) with a robust "Human-in-the-Loop" verification workflow.
 
-# 3. Install deps
-conda install -c conda-forge ffmpeg==7.1.1
-pip install torch==2.8.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu128
-pip install -r requirements.txt
+**Intended audience**
+- Investigators / analysts working with recorded conversations
+- Researchers validating diarization & transcription results
+- Developers exploring human-verified AI pipelines
+---
+## Key Improvements in v0.3
+* **Decoupled Cleaning Pipeline:** Clean your audio once as an explicit first step, ensuring consistent results across transcription, diarization, and the Snipper.
+* **Truth Persistence:** Manually corrected segments (Ground Truth) are locked—AI re-runs will never overwrite your manual work.
+* **Enhanced Windows Stability:** Removed Conda FFmpeg dependencies to eliminate DLL conflicts with PySide6/Qt.
+* **Audio Snipper Workbench:** A precision tool for splitting, merging, and "voice printing" speakers with surgical accuracy.
 
-# 4. Run
-python launch.py
-```
 ---
 
-## 🧭 About
-
----
->VocalTrace is an advanced forensic audio workbench that combines **Biometric Speaker Identification**, **Human-in-the-Loop Diarization**, and **LLM-based Analysis**.
->
->Unlike standard transcription tools, VocalTrace allows you to build a "Voice Bank" of known speakers, manually correct AI mistakes (which are then enforced as ground truth), and chat with the transcript using RAG (Retrieval-Augmented Generation) to extract evidence and contradictions.
->
-> Speaker diarization, transcription, and automatic speech recognition using **Pyannote**, **OpenAI Whisper**, and **KBLab’s KB-Whisper** (auto-selected for Swedish audio).
-
-## 🖥️ User Interface
+## User Interface
 
 _Segmented, speaker-labeled transcript with waveform-linked playback (“sync-on-click”)._
 
@@ -53,131 +40,243 @@ _Lets you chat with the transcript using RAG + LLM_
 _Precision audio labeling tool + commit corrected segments to Voice Bank_
 
 ![VocalTrace-Audio Snipper Workbench](assets/Audio_Snipper.png)
+---
+## Features
 
-## 🌟 Key Features
+- **Speaker diarization** (Pyannote) with progress feedback
+- **Transcription** (Whisper / Transformers pipeline)
+- **Audio cleaning** via `AudioDenoiser` (noise reduction + filters + normalization)
+- **Voice bank / biometrics** utilities (experimental)
+- **LLM analysis** (OpenAI / Gemini) and optional RAG tooling
+- **Ground truth persistence** – manually verified segments are locked and never overwritten by re-runs
+---
 
-🕵️‍♂️ Biometric Speaker Identification  
-Create a voice bank. VocalTrace identifies real speakers across recordings using learned voiceprints.
+## Quick start (Windows / Linux / macOS)
 
-✏️ Inline Transcript Editing  
-Edit transcript lines directly with instant waveform sync and commit corrected segments as verified ground truth.
-
-✂️ Audio Snipper Workbench  
-Slice audio visually, correct diarization errors, and add verified samples to the Voice Bank.
-
-🔒 Ground Truth Persistence  
-Corrected segments become locked. Future runs only transcribe the unverified gaps.
-
-🧠 LLM-Based Conversation Analysis  
-Generate summaries, psychological profiles, conflict maps, and more using ChatGPT or Gemini.
-
-💬 Evidence Chat (RAG)  
-Ask: “Did John admit anything about the contract?”  
-Receive answers with exact timestamps.
-
-⏯️ Sync-on-Click  
-Click any transcript line to jump the audio player to that moment.
-
-## 🛠️ Installation
-
-VocalTrace requires **Python 3.10-3.12** (Tested primarily on 3.12).  
-A GPU is highly recommended for pyannote + Whisper.
-
-### 1. Prerequisites
-*   **NVIDIA GPU** (Recommended)
-*   **Conda installed**
-*   **HuggingFace Account:** (for pyannote models, and you must accept the user agreements for [pyannote/speaker-diarization-community-1](https://huggingface.co/pyannote/speaker-diarization-community-1).)
-
-### 2. Setup Environment
-
+### 1) Clone
 ```bash
-# 1. Create a clean Conda environment
+git clone https://github.com/Rakile/VocalTrace.git
+cd VocalTrace
+```
+
+### 2) Create a Python env
+Use either `venv` or Conda.
+
+**venv (recommended for GUI stability on Windows)**
+```bash
+python -m venv .venv
+# Windows
+.venv\Scripts\activate
+# Linux/macOS
+source .venv/bin/activate
+```
+
+**Conda (OK, but do NOT install conda ffmpeg)**
+```bash
 conda create -n vocaltrace python=3.12
 conda activate vocaltrace
+```
 
-# 2. Install FFmpeg (Required for TorchCodec)
-# Why Conda FFMpeg? Pyannote & TorchCodec require system-level FFmpeg libraries. The `conda-forge` build bundles the correct versions, avoiding DLL load failures.
-conda install -c conda-forge ffmpeg==7.1.1
+### 3) Install PyTorch
+Pick the command that matches your platform/CUDA. See the official selector at pytorch.org.
 
-# 3. Install PyTorch (GPU Version)
-# CRITICAL: Do this BEFORE installing requirements.
-# Pyannote 4.0.3 requires Torch 2.8.0. We point to the CUDA 12.8 wheel index:
-pip install torch==2.8.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu128
+Example (CUDA 12.8 wheels):
+```bash
+pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu128
+```
 
-# 4. Install Application
-# This will install pyannote.audio, torchcodec, and the GUI.
+### 4) Install Python deps
+```bash
 pip install -r requirements.txt
 ```
 
-### 3. API Keys
-Create an `.env` file (or set system environment variables) with the following:
+### 5) Install **system ffmpeg** (required)
+VocalTrace uses an **ffmpeg executable** to decode audio for diarization/transcription when needed.
 
-### 🔐 Diarization Model Keys
-> **Default model:** `pyannote/speaker-diarization-community-1`  
-> Requires: HF_TOKEN_TRANSCRIBE=hf_...
+- **Windows:** install ffmpeg and ensure `ffmpeg.exe` is on PATH (or set `VOCALTRACE_FFMPEG`)
+- **Linux:** `sudo apt-get install ffmpeg`
+- **macOS:** `brew install ffmpeg`
 
-> **Optional premium model:** `pyannote/speaker-diarization-precision-2`  
-> Requires: PYANNOTE_PRECISION2_API_KEY=sk_6..
+If ffmpeg is not on PATH, set:
+```bash
+# Windows (PowerShell)
+$env:VOCALTRACE_FFMPEG="C:\path\to\ffmpeg.exe"
 
-### 🔐 LLM model API Keys for subscribed Analysis & Chat (Choose one or both)
-> **ChatGpt 5.1:**  
-> Requires: OPENAI_API_KEY=sk-...
+# Linux/macOS
+export VOCALTRACE_FFMPEG=/usr/bin/ffmpeg
+```
+> ⚠️ **Important (Windows):** Do NOT install ffmpeg via Conda in this environment.
+> Conda ffmpeg causes DLL conflicts with PySide6/Qt.
 
-> **Gemini 2.5-Pro:**  
-> Requires: GEMINI_TRANSCRIBE_ANALYSIS_API_KEY=AIza...
+### 6) The "ClearVoice" Option (Important)
+
+VocalTrace supports **ClearVoice** for AI-based speech enhancement. Because it has strict version requirements, it is not included in the default `requirements.txt`.
+
+**To enable ClearVoice:**
+
+1. Run `pip install clearvoice`.
+2. **Crucial:** After installing clearvoice, you **must** re-run the main requirements to fix the version conflicts it creates:
+```bash
+pip install -r requirements.txt
+
+```
+
+## Configuration (API Keys)
+
+Create an `.env` file in the root directory:
+
+* `HF_TOKEN_TRANSCRIBE`: For Pyannote models.
+* `GEMINI_TRANSCRIBE_ANALYSIS_API_KEY`: For Gemini 2.5 analysis.
+* `OPENAI_API_KEY`: For GPT-4o/5.1 analysis.
 
 
-## 🚀 Usage
-Run the launcher from the project root:
+### Optional: FlashAttention2 (lower VRAM, faster inference)
+
+VocalTrace **automatically supports FlashAttention2** when available to reduce GPU memory usage and improve inference speed for Whisper-based models.
+
+> FlashAttention2 is **optional**.
+> If it is not installed or not supported on your system, VocalTrace **automatically falls back to standard (“eager”) attention** with no loss of correctness.
+
+Internally, VocalTrace attempts to load models with:
+
+```python
+attn_implementation="flash_attention_2"
+```
+
+and transparently falls back to:
+
+```python
+attn_implementation="eager"
+```
+
+if FlashAttention2 is unavailable.
+
+---
+
+### Requirements & notes
+
+* Requires a **compatible NVIDIA GPU**
+* Supported for **fp16 / bf16** models
+* Works best with recent PyTorch + CUDA builds
+* Not required for CPU inference or smaller models
+
+---
+
+### Linux installation (often easiest)
+
+On many Linux systems, FlashAttention can be installed directly via pip:
+
+```bash
+pip install flash-attn --no-build-isolation
+```
+
+If this fails, it usually means your CUDA / PyTorch toolchain is not compatible with building the extension locally.
+
+---
+
+### Windows installation (recommended: prebuilt wheels)
+
+Building FlashAttention from source on Windows is often difficult.
+The **recommended approach** is to install a **prebuilt wheel** that matches:
+
+* Python version (e.g. `cp312`)
+* PyTorch version (e.g. `torch2.8`)
+* CUDA version (e.g. `cu128`)
+* Architecture (`win_amd64`)
+
+Example source of Windows prebuilt wheels:
+
+* [https://github.com/mjun0812/flash-attention-prebuild-wheels/releases](https://github.com/mjun0812/flash-attention-prebuild-wheels/releases)
+
+Example filename:
+
+```
+flash_attn-2.8.2+cu128torch2.8-cp312-cp312-win_amd64.whl
+```
+
+Install with:
+
+```bash
+pip install flash_attn-2.8.2+cu128torch2.8-cp312-cp312-win_amd64.whl
+```
+
+Verify:
+
+```bash
+python -c "import flash_attn; print('flash-attn OK')"
+```
+
+---
+
+### Troubleshooting
+
+* If FlashAttention fails to load, VocalTrace will log a warning and continue using eager attention.
+* No configuration changes are required to disable FlashAttention manually.
+* If you encounter crashes during model loading, uninstall `flash-attn` and retry — VocalTrace will still function normally.
+
+---
+
+### 7) Run
 ```bash
 python launch.py
 ```
 
-### Workflow
-1.  **Load Audio:** Open an MP3/WAV file.
-2.  **Voice Bank:** (Optional) Select known voices in the "Voice Bank" tab to target specific people.
-3.  **Run Analysis:** Select "Transcribe + analyze audio".
-4.  **Refine:**
-    *   Right-click any line in the transcript to **"Refine in Snipper"**. Verified segments become ground truth, meaning future transcriptions cannot overwrite them.
-    *   Adjust the waveform, correct the text, and click **Commit**.
-    *   This saves the segment as "Verified" (Green).
-5.  **Chat:** Go to the "Chat" tab to ask questions about the conversation.
+---
 
-## 🐛 Troubleshooting
+## Troubleshooting
 
-<ins>**"DLL Load Failed" on startup?**</ins>  
-VocalTrace includes a `bootstrap.py` system to handle conflicts between Conda's FFmpeg and PySide6. Ensure you are running via `launch.py` or `src/main.py`, which triggers this fix automatically.
+### PySide6 / Qt import errors (Windows)
+If you previously installed `ffmpeg` via **Conda** in the same environment and PySide6 fails to import, remove the conda ffmpeg package:
+```bash
+conda remove ffmpeg
+```
+Then use a **system ffmpeg executable** (see above).
 
-<ins>**FlashAttention error? ("RuntimeError: Failed to load CUDA kernels for FlashAttention")**</ins>  
-Some environments auto-install `flash-attn`, which breaks Whisper on Windows.  
-Fix: `pip uninstall flash-attn`
+### ffmpeg not found
+If you see an error like “ffmpeg executable not found”, install ffmpeg or set `VOCALTRACE_FFMPEG`.
 
-## ✍️ Roadmap
-* [ ] Export analysis report as PDF/Word
-* [ ] Batch processing / queue mode
-* [ ] Visual heatmap of speaker overlap & confidence
-* [ ] CLI interface for headless servers
-> (Developer note: legacy CLI entrypoints still exist for experimentation.)
-> > ```
-> > usage: transcription_engine.py [-h] [--out OUT] [--language LANGUAGE]
-> >                               [--model MODEL] [--hf-token HF_TOKEN]
-> >                               [--num-speakers NUM_SPEAKERS] [--names NAMES]
-> >                               [--fingerprints FINGERPRINTS] [--srt]
-> >                               [--enable_analysis] [--gap GAP]
-> >                               audio
-> >```
-> > ```
-> > usage: analysis_engine.py [-h] [--analysis-language {sv,en,auto}]
-> >                           [--backend {gemini,chatgpt}]
-> >                           transcript_filename
-> >```
+### Logging
+Set log level with:
+```bash
+# Windows (PowerShell)
+$env:VOCALTRACE_LOGLEVEL="DEBUG"
 
-
-## 📜 License
-CC-BY-4.0 Licensed. See `LICENSE` for details.
+# Linux/macOS
+export VOCALTRACE_LOGLEVEL=DEBUG
+```
 
 ---
-⚠️ VocalTrace is under active development.  
-APIs and internal file formats may change between versions.
 
-Developed by **Rakile** with assistance **Gemini** (...and ChatGpt 😊).
+## The VocalTrace Workflow
+
+VocalTrace follows a linear forensic process to ensure the highest data integrity:
+
+### 1. Audio Preparation (Denoising)
+Load your source file and use the **"Clean Audio Now"** feature. This uses the `AudioDenoiser` engine to create a high-quality "Working Copy" (`_cleaned.wav`) while preserving your original evidence. Once cleaned, the entire app (including the Snipper) automatically switches to this improved source.
+
+### 2. Diarization & Identity
+The engine detects "who spoke when." Use the **Voice Bank** to match detected clusters against known biometric signatures. v0.3 supports in-memory processing to avoid disk-thrashing.
+
+### 3. Verified Transcription
+Run the Whisper-based transcription on your cleaned audio. 
+* **Refinement:** Right-click any segment in the transcript to open the **Snipper**. 
+* **Commit:** Adjust boundaries, correct text, and click **Commit**. Committed segments turn **Green** and are stored as "Verified Ground Truth."
+
+### 4. Evidence Chat (RAG)
+Use the "Chat with Evidence" tab to query your transcript. The system uses **Retrieval-Augmented Generation** to answer questions based *only* on the provided transcript, complete with a dynamic persona (e.g., "Forensic Accountant") generated during initial analysis.
+
+## Project layout
+
+- `launch.py` – entrypoint (adds `src/` to path and starts the Qt app)
+- `src/main.py` – main Qt window + tabs
+- `src/transcription_engine.py` – diarization + transcription orchestration
+- `src/AudioDenoiser.py` – audio cleaning pipeline (authoritative audio processing)
+- `src/ui/*` – GUI tabs and helpers
+- `voices/` – voice samples / bank
+
+---
+
+## ⚖️ License
+
+VocalTrace is licensed under the **MIT License**. (See `LICENSE.txt` for details).
+*Note: We recommend the MIT license for software over CC-BY to ensure compatibility with open-source repositories.*

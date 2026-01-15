@@ -1,10 +1,8 @@
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import Any, Callable, Dict
+from typing import Any, Callable, Dict, Optional
 import json
 import sys
-
-from onnx.reference.ops.op_optional import Optional
 from openai import OpenAI
 from langdetect import detect, LangDetectException
 import argparse
@@ -458,7 +456,11 @@ def analyze_conversation(
         mini_model=mini_model,
         deep_model=deep_model,
     )
-    if backend.lower().startswith("openai") or "gpt" in backend.lower(): # backend.lower() in ("gpt", "chatgpt"):
+    if backend.lower().startswith("lmstudio"):
+        chosen_model = backend.lower().replace("lmstudio", "openai")
+        pre = None
+        reason = f"Using LMStudio backend '{backend}'; skipping GPT model selection."
+    elif backend.lower().startswith("openai") or "gpt" in backend.lower(): # backend.lower() in ("gpt", "chatgpt"):
         print("[i] Preclass: calling gpt-5-nano (to decide what model should be used)")
         sel = selector.select_model(transcript)
         #sel = selector.select_model_mockup(transcript)
@@ -537,6 +539,27 @@ def call_llm_openai_stub(model_name: str, prompt: str) -> str:
 
 def call_llm_openai(model_name: str, prompt: str) -> str:
     client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    response = client.responses.create(
+        model=model_name,
+        input=prompt,
+        #service_tier="flex"
+    )
+
+    # Plocka ut texten – kontrollera ev. struktur i ditt eget projekt
+    parts = []
+    for item in response.output:
+        if hasattr(item, "content"):
+            if item.content:
+                for c in item.content:
+                    if hasattr(c, "type"):
+                            if c.type == "output_text":
+                                parts.append(c.text)
+    return "\n".join(parts)
+
+base_url = os.environ.get("LMSTUDIO_BASE_URL", "http://127.0.0.1:1234/v1")
+api_key = os.environ.get("LMSTUDIO_API_KEY", "lm-studio")
+def call_llm_lmstudio(model_name: str, prompt: str) -> str:
+    client = OpenAI(base_url=base_url, api_key=api_key)
     response = client.responses.create(
         model=model_name,
         input=prompt,
