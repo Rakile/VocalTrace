@@ -82,7 +82,7 @@ Pick the command that matches your platform/CUDA. See the official selector at p
 
 Example (CUDA 12.8 wheels):
 ```bash
-pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu128
+pip install torch==2.8.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu128
 ```
 
 ### 4) Install Python deps
@@ -280,5 +280,6 @@ Use the "Chat with Evidence" tab to query your transcript. The system uses **Ret
 
 VocalTrace is licensed under the **MIT License**. (See `LICENSE.txt` for details).
 *Note: We recommend the MIT license for software over CC-BY to ensure compatibility with open-source repositories.*
+
 
 
