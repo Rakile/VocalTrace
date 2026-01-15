@@ -413,7 +413,9 @@ class MainWindow(QMainWindow):
         if not self._audio_path:
             QMessageBox.warning(self, "No Audio", "Please open an audio file first.")
             return
-
+        if self._audio_path != self._original_audio_path:
+            QMessageBox.warning(self, "Audio has already been cleaned before.", "Please reload the original audio file again before cleaning.")
+            return
         self._set_running(True)  # Disables all buttons as you intended
         self.progress_bar.setRange(0, 0)  # Pulsing progress
 
