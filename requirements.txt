@@ -1,12 +1,12 @@
 # --- GUI Framework ---
-PySide6>=6.10.1,<7  # Qt6-only, avoid Qt7 breaking changes
+PySide6>=6.10.1,<7  # Qt6 stability
 
 # --- Audio Processing ---
 pyannote.audio>=4.0.3
-soundfile>=0.13.1
+soundfile==0.13.1   # Fixed to satisfy both
 langdetect>=1.0.9
 scipy>=1.16.3
-numpy>=2.0.0
+numpy==2.2.2        # Forced for Pyannote 4.0.3 stability
 
 # --- AI & Machine Learning ---
 transformers>=4.57.3
