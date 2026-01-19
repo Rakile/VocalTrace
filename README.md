@@ -224,6 +224,10 @@ python launch.py
 ---
 
 ## Troubleshooting
+### torchcodec Warning
+VocalTrace bypasses the use of torchcodec so it is safe to ignore the warning:
+"UserWarning: 
+torchcodec is not installed correctly so built-in audio decoding will fail."
 
 ### PySide6 / Qt import errors (Windows)
 If you previously installed `ffmpeg` via **Conda** in the same environment and PySide6 fails to import, remove the conda ffmpeg package:
@@ -280,3 +284,4 @@ Use the "Chat with Evidence" tab to query your transcript. The system uses **Ret
 
 VocalTrace is licensed under the **MIT License**. (See `LICENSE.txt` for details).
 *Note: We recommend the MIT license for software over CC-BY to ensure compatibility with open-source repositories.*
+
