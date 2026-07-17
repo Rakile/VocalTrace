@@ -21,35 +21,46 @@
 
 ## User Interface
 
-_Segmented, speaker-labeled transcript with waveform-linked playback (“sync-on-click”)._
+_Main window — diarization / transcription models, live Backend list (LM Studio · OpenAI · Gemini), cleaning options, sync-on-click playback, and speaker-labeled transcript._
 
-![VocalTrace-Transcript Tab](assets/Transcript_Tab.png)
+![VocalTrace main window](assets/Main_Window.png)
 
-_LLM summary, psychological profile, themes_
+_Transcript tab — segmented lines with timestamps and speaker labels (sync-on-click)._
 
-![VocalTrace-Analyze Tab](assets/Raw_JSON_Tab.png)
+![VocalTrace Transcript tab](assets/Transcript_Tab.png)
 
-_Manage known speakers and biometric signatures_
+_Summary & Themes — LLM analysis when a cloud or LM Studio backend is selected._
 
-![VocalTrace-Voice Bank Tab](assets/Voice_Bank_Tab.png)
+![VocalTrace Summary / analysis](assets/Raw_JSON_Tab.png)
 
-_Lets you chat with the transcript using RAG + LLM_
+_Voice Bank — manage known speakers and biometric samples._
 
-![VocalTrace-Evidence Chat Tab](assets/Chat_With_Evidence_Tab.png)
+![VocalTrace Voice Bank](assets/Voice_Bank_Tab.png)
 
-_Precision audio labeling tool + commit corrected segments to Voice Bank_
+_Chat with Evidence — RAG Q&A over the transcript._
 
-![VocalTrace-Audio Snipper Workbench](assets/Audio_Snipper.png)
+![VocalTrace Chat with Evidence](assets/Chat_With_Evidence_Tab.png)
+
+_Audio Snipper — precision labeling and commit corrected segments to the Voice Bank._
+
+![VocalTrace Audio Snipper](assets/Audio_Snipper.png)
+
+Use **Settings (API keys)…** in the app for Hugging Face / OpenAI / Gemini tokens (saved to `.env`).
+
 ---
+
 ## Features
 
 - **Speaker diarization** (Pyannote) with progress feedback
 - **Transcription** (Whisper / Transformers pipeline)
 - **Audio cleaning** via `AudioDenoiser` (noise reduction + filters + normalization)
 - **Voice bank / biometrics** utilities (experimental)
-- **LLM analysis** (OpenAI / Gemini) and optional RAG tooling
+- **LLM analysis** (OpenAI / Gemini / LM Studio) with **live model lists**
+- **In-app API key settings** (writes `.env`)
 - **Ground truth persistence** – manually verified segments are locked and never overwritten by re-runs
+
 ---
+
 
 ## Quick start (Windows / Linux / macOS)
 
