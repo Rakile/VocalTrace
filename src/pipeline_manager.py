@@ -65,8 +65,13 @@ def transcribe_audio_to_text(
     else:
         model_id = transcription_model
 
-    # 1. Diarization
-    raw_segments = run_diarization(audio_path, num_speakers, hf_token)
+    # 1. Diarization (honor GUI model selection)
+    raw_segments = run_diarization(
+        audio_path,
+        num_speakers,
+        hf_token,
+        diarization_model=diarization_model,
+    )
 
     # --- 1.5) Fingerprinting ---
     # Prioritize Dict, fallback to Path

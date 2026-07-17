@@ -108,10 +108,29 @@ def run_diarization(audio_path, num_speakers, hf_token, *, diarization_model: st
         token = hf_token
         print(f"[i] Using diarization model: {model_id}")
 
+    if not token:
+        raise RuntimeError(
+            "Missing Hugging Face token for Pyannote.\n"
+            "Set HF_TOKEN_TRANSCRIBE in the project .env file "
+            "(see .env.example), accept the model terms on Hugging Face, "
+            "then restart VocalTrace.\n"
+            f"Model: https://huggingface.co/{model_id}\n"
+            "Token: https://huggingface.co/settings/tokens"
+        )
+
     try:
         diarization_pipeline = Pipeline.from_pretrained(model_id, token=token)  # Renamed for clarity
     except Exception as e:
-        raise RuntimeError(f"Error loading Pyannote: {e}") from e
+        err = str(e)
+        hint = ""
+        low = err.lower()
+        if "401" in err or "403" in err or "gated" in low or "authorized" in low or "token" in low:
+            hint = (
+                "\n\nHint: create a HF token, set HF_TOKEN_TRANSCRIBE in .env, "
+                f"and open https://huggingface.co/{model_id} while logged in "
+                "to accept the model license. Then restart the app."
+            )
+        raise RuntimeError(f"Error loading Pyannote ({model_id}): {e}{hint}") from e
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     diarization_pipeline.to(device)
@@ -185,7 +204,89 @@ def merge_close_segments(segments, gap_threshold=2.0, unknown_speaker_length_thr
     return merged
 
 
+def pack_segments_for_asr(
+    segments: list,
+    *,
+    max_pack_sec: float = 28.0,
+    max_gap_sec: float = 3.0,
+) -> list:
+    """Collapse consecutive same-speaker fragments before Whisper.
+
+    Models like speaker-diarization-community-1 emit hundreds of sub-second
+    turns. Each Whisper call is expensive; packing same-speaker crumbs with
+    small gaps (and capping pack length ~28s) restores ~200–300 ASR calls
+    similar to speaker-diarization-3.1 on the same audio.
+    """
+    if not segments:
+        return []
+
+    packed: list = []
+    i = 0
+    n = len(segments)
+    while i < n:
+        seg = segments[i]
+        if seg.get("is_verified"):
+            packed.append(dict(seg))
+            i += 1
+            continue
+
+        cur = {
+            "start": float(seg["start"]),
+            "end": float(seg["end"]),
+            "speaker": seg["speaker"],
+        }
+        i += 1
+        while i < n:
+            nxt = segments[i]
+            if nxt.get("is_verified"):
+                break
+            if nxt.get("speaker") != cur["speaker"]:
+                break
+            gap = float(nxt["start"]) - cur["end"]
+            if gap > max_gap_sec:
+                break
+            new_end = float(nxt["end"])
+            if (new_end - cur["start"]) > max_pack_sec:
+                break
+            cur["end"] = new_end
+            i += 1
+        packed.append(cur)
+    return packed
+
+
 # --- ASR on Clips (Step 3) ----------------------------------------------------
+
+def _extract_whisper_text(processor, gen_ids) -> str:
+    """Decode Whisper generate() output across transformers 4.x / 5.x APIs."""
+    # Preferred path on transformers 4.57.x (working VocalTrace env)
+    try:
+        result = processor.batch_decode(gen_ids, output_offsets=True)
+        if isinstance(result, list) and result:
+            item = result[0]
+            if isinstance(item, dict):
+                return str(item.get("text") or "").strip()
+            return str(item).strip()
+        if isinstance(result, dict):
+            texts = result.get("text") or []
+            if isinstance(texts, list) and texts:
+                return str(texts[0] or "").strip()
+            if isinstance(texts, str):
+                return texts.strip()
+    except Exception:
+        pass
+    # Fallback used when output_offsets layout changes (transformers 5.x)
+    try:
+        texts = processor.batch_decode(
+            gen_ids,
+            skip_special_tokens=True,
+            clean_up_tokenization_spaces=False,
+        )
+        if texts:
+            return str(texts[0] or "").strip()
+    except Exception:
+        pass
+    return ""
+
 
 def transcribe_segments(audio_path, segments, model_id, language, device, *, progress_callback=None):
     from audio_processing_profiles import AudioProcessingProfiles
@@ -246,6 +347,19 @@ def transcribe_segments(audio_path, segments, model_id, language, device, *, pro
 
     final_results = []
 
+    # Pack fine-grained diarization (esp. community-1) before ASR
+    n_before = len(segments)
+    segments = pack_segments_for_asr(segments, max_pack_sec=28.0, max_gap_sec=3.0)
+    n_after = len(segments)
+    if n_after != n_before:
+        print(
+            f"[i] Packed same-speaker crumbs for ASR: {n_before} → {n_after} "
+            f"(gap≤3.0s, pack≤28s). Tip: diarization-3.1 yields fewer turns "
+            f"than community-1 on the same file."
+        )
+    else:
+        print(f"[i] ASR segments after pack: {n_after} (no further collapse)")
+
     # Filter: Separate verified from unverified
     to_transcribe = []
     for seg in segments:
@@ -260,6 +374,7 @@ def transcribe_segments(audio_path, segments, model_id, language, device, *, pro
             to_transcribe.append(seg)
 
     total_segments = len(to_transcribe)
+    print(f"[i] Whisper will process {total_segments} segments")
 
     for i, seg in enumerate(tqdm(to_transcribe, desc="[i] Transcribing", unit="seg")):
         start = seg["start"]
@@ -275,15 +390,27 @@ def transcribe_segments(audio_path, segments, model_id, language, device, *, pro
         if len(audio_cut) < ((pad * 3) * sr): continue
 
         try:
-            #result = asr_pipe(audio_cut, generate_kwargs=generate_kwargs)
-            #------New pipe-----
-            inputs = whisper_processor(audio_cut, sampling_rate=sr, return_tensors="pt", return_attention_mask=True,)
+            inputs = whisper_processor(
+                audio_cut,
+                sampling_rate=sr,
+                return_tensors="pt",
+                return_attention_mask=True,
+            )
             inputs = inputs.to(device, dtype=torch_dtype)
 
-            gen_ids = model.generate(**inputs, **generate_kwargs)
-            result = whisper_processor.batch_decode(gen_ids, output_offsets=True)
+            gen_kw = dict(generate_kwargs)
+            # Optional language force (GUI / pipeline language)
+            if language and str(language).lower() not in ("", "auto", "unknown"):
+                lang = str(language).lower()
+                if lang in ("sv", "sv-se"):
+                    gen_kw["language"] = "swedish"
+                elif lang in ("en", "en-us", "en-gb"):
+                    gen_kw["language"] = "english"
+                else:
+                    gen_kw["language"] = lang
 
-            text = result[0].get("text", "").strip()
+            gen_ids = model.generate(**inputs, **gen_kw)
+            text = _extract_whisper_text(whisper_processor, gen_ids)
             if text:
                 final_results.append({
                     "start": start, "end": end, "speaker": spk, "text": text
@@ -292,9 +419,9 @@ def transcribe_segments(audio_path, segments, model_id, language, device, *, pro
                 progress_callback(i + 1, total_segments)
         except Exception as e:
             if hasattr(tqdm, "write"):
-                tqdm.write(f"[!] Failed segment {i}: {e}")
+                tqdm.write(f"[!] Failed segment {i}: {type(e).__name__}: {e!r}")
             else:
-                print(f"[!] Failed segment {i}: {e}")
+                print(f"[!] Failed segment {i}: {type(e).__name__}: {e!r}")
 
     audio_cleaner.cleanup_temp_files()
     del model, audio_cleaner, whisper_processor, full_audio_np #, asr_pipe

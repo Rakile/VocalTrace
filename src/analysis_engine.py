@@ -538,7 +538,13 @@ def call_llm_openai_stub(model_name: str, prompt: str) -> str:
     raise NotImplementedError("Replace call_llm_openai_stub with real implementation")
 
 def call_llm_openai(model_name: str, prompt: str) -> str:
-    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    api_key = (os.getenv("OPENAI_API_KEY") or "").strip()
+    if not api_key:
+        raise RuntimeError(
+            "OPENAI_API_KEY is not set. Open Settings (API keys) and paste your "
+            "OpenAI key, or add OPENAI_API_KEY to .env."
+        )
+    client = OpenAI(api_key=api_key)
     response = client.responses.create(
         model=model_name,
         input=prompt,
@@ -559,9 +565,13 @@ def call_llm_openai(model_name: str, prompt: str) -> str:
 base_url = os.environ.get("LMSTUDIO_BASE_URL", "http://127.0.0.1:1234/v1")
 api_key = os.environ.get("LMSTUDIO_API_KEY", "lm-studio")
 def call_llm_lmstudio(model_name: str, prompt: str) -> str:
+    # Combo may be "LMStudio/my-model"; server wants "my-model"
+    mid = model_name
+    if mid.lower().startswith("lmstudio/"):
+        mid = mid.split("/", 1)[1]
     client = OpenAI(base_url=base_url, api_key=api_key)
     response = client.responses.create(
-        model=model_name,
+        model=mid,
         input=prompt,
         #service_tier="flex"
     )
@@ -607,9 +617,16 @@ def call_llm_gemini_25_pro(model_name: str, prompt: str) -> str:
     from google import genai
     from google.genai import types, errors
 
-    api_key = os.getenv("GEMINI_TRANSCRIBE_ANALYSIS_API_KEY")
+    api_key = (
+        (os.getenv("GEMINI_TRANSCRIBE_ANALYSIS_API_KEY") or "").strip()
+        or (os.getenv("GEMINI_API_KEY") or "").strip()
+        or (os.getenv("GOOGLE_API_KEY") or "").strip()
+    )
     if not api_key:
-        raise RuntimeError("GEMINI_API_KEY environment variable is not set")
+        raise RuntimeError(
+            "Gemini API key is not set. Open Settings (API keys) and set "
+            "GEMINI_TRANSCRIBE_ANALYSIS_API_KEY, or add it to .env."
+        )
 
     client = genai.Client(api_key=api_key)
 

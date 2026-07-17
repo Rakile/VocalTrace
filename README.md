@@ -53,6 +53,94 @@ _Precision audio labeling tool + commit corrected segments to Voice Bank_
 
 ## Quick start (Windows / Linux / macOS)
 
+### Easiest path (recommended)
+
+**Prerequisites (once per machine)**
+
+1. **Python 3.12.10+** (3.12.x only — not 3.11 / 3.13, not broken early 3.12)  
+   https://www.python.org/downloads/release/python-31210/
+2. **ffmpeg** on your system `PATH` (not Conda’s ffmpeg on Windows)
+3. Optional: NVIDIA driver if you want GPU acceleration
+
+**Install**
+
+| Platform | What to do |
+|----------|------------|
+| **Windows** | Double-click **`installation.bat`** |
+| **Linux / macOS** | `chmod +x installation.sh && ./installation.sh` |
+
+The installer will:
+
+1. Find a valid Python 3.12.10+  
+2. Create `.venv`  
+3. Detect NVIDIA and install **PyTorch 2.8.0** (CUDA 12.8 or CPU)  
+4. Install app dependencies (transformers **4.57.x**, pyannote **4.0.3**, …)  
+5. **Ask you** (interactive):
+   - Install **FlashAttention2**? (optional, faster Whisper on NVIDIA; needs a matching `.whl` on Windows)
+   - Install **ClearVoice**? (optional AI enhancement; not required)
+6. Remove broken **torchcodec** if pip pulled it in  
+7. Create **`run.bat`** / **`run.sh`** and optionally launch the app  
+
+Non-interactive (CI / scripted defaults — CUDA if GPU present, skip ClearVoice):
+
+```bat
+installation.bat --yes
+```
+
+```bash
+./installation.sh --yes
+```
+
+**Run the app**
+
+| Platform | What to do |
+|----------|------------|
+| **Windows** | Double-click **`run.bat`** |
+| **Linux / macOS** | `./run.sh` |
+
+**First use tips**
+
+- Diarization model: **`pyannote/speaker-diarization-3.1`** (default; fewer segments → faster)
+- Transcription: **`auto`** or **`KBLab/kb-whisper-large`** for Swedish  
+- **API keys:** use **Settings (API keys)…** in the app (saves to `.env`), or edit `.env` manually  
+  - Installer creates `.env` from `.env.example` if missing  
+  - Status line shows **HF token: set / missing**
+
+Manual steps below are only if you prefer not to use the installer.
+
+### Requirements (read this first)
+
+| Requirement | Details |
+|-------------|---------|
+| **Python** | **`3.12.10` only (or later 3.12.x)** — **not** “any 3.12” |
+| **ffmpeg** | System install on `PATH` (or `VOCALTRACE_FFMPEG`) — **not** Conda ffmpeg on Windows |
+| **GPU (optional)** | NVIDIA + matching PyTorch CUDA wheel |
+
+#### Why not plain “Python 3.12”?
+
+Early **3.12.0–3.12.9** builds hit a known packaging bug that surfaces as:
+
+```text
+AttributeError: '_SixMetaPathImporter' object has no attribute '_path'
+```
+
+That is fixed in **Python 3.12.10**. Use **3.12.10** (or a later **3.12.x** patch). Do **not** use 3.11, 3.13, or unpatched 3.12.
+
+Verify before creating the venv:
+
+```bash
+# Windows (py launcher)
+py -3.12 -c "import sys; print(sys.version)"
+# Expect something like: 3.12.10 (tags/v3.12.10:...)
+
+# Linux/macOS
+python3.12 -c "import sys; print(sys.version)"
+```
+
+If the patch level is below `.10`, install [Python 3.12.10](https://www.python.org/downloads/release/python-31210/) (or a newer 3.12.x) and use that interpreter explicitly.
+
+`launch.py` refuses to start on an unsupported Python version.
+
 ### 1) Clone
 ```bash
 git clone https://github.com/Rakile/VocalTrace.git
@@ -60,30 +148,44 @@ cd VocalTrace
 ```
 
 ### 2) Create a Python env
-Use either `venv` or Conda.
+Use either `venv` or Conda. **Pin the interpreter to 3.12.10+.**
 
 **venv (recommended for GUI stability on Windows)**
 ```bash
+# Windows — force the 3.12 series via the py launcher, then confirm 3.12.10+
+py -3.12 -c "import sys; assert sys.version_info[:3] >= (3, 12, 10), sys.version"
+py -3.12 -m venv .venv
+.venv\Scripts\activate.bat
+
+# Linux/macOS (if python3.12 is 3.12.10+)
+python3.12 -c "import sys; assert sys.version_info[:3] >= (3, 12, 10), sys.version"
 python3.12 -m venv .venv
-# Windows
-.venv\Scripts\activate
-# Linux/macOS
 source .venv/bin/activate
+
+# Confirm inside the venv:
+python -c "import sys; print(sys.version)"
+# Must be 3.12.10 or later 3.12.x
 ```
 
 **Conda (OK, but do NOT install conda ffmpeg)**
 ```bash
-conda create -n vocaltrace python=3.12
+conda create -n vocaltrace python=3.12.10
 conda activate vocaltrace
+python -c "import sys; print(sys.version)"  # confirm 3.12.10+
 ```
 
 ### 3) Install PyTorch
-Pick the command that matches your platform/CUDA. See the official selector at pytorch.org.
 
-Example (CUDA 12.8 wheels):
+**Tested / recommended:** **PyTorch `2.8.0` + torchaudio `2.8.0`**.  
+Do **not** treat this as “any torch version is fine.” Newer or older builds may work, but VocalTrace is validated against **2.8.0**.
+
+**NVIDIA Blackwell** (and other current CUDA 12.8 stacks) should use that pin with the **cu128** wheels:
+
 ```bash
 pip install torch==2.8.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu128
 ```
+
+For other platforms (CPU-only, older CUDA, macOS), use the [official PyTorch install selector](https://pytorch.org/get-started/locally/) and still aim for **torch / torchaudio 2.8.0** (or the closest matching 2.8.x build), not an arbitrary latest.
 
 ### 4) Install Python deps
 ```bash
@@ -123,11 +225,44 @@ pip install -r requirements.txt
 
 ## Configuration (API Keys)
 
-Create an `.env` file in the root directory:
+Keys live in a **`.env`** file in the project root (same folder as `launch.py`).
 
-* `HF_TOKEN_TRANSCRIBE`: For Pyannote models.
-* `GEMINI_TRANSCRIBE_ANALYSIS_API_KEY`: For Gemini 2.5 analysis.
-* `OPENAI_API_KEY`: For GPT-4o/5.1 analysis.
+1. After install you should already have `.env` (copied from `.env.example`).  
+   If not: copy `.env.example` → `.env`
+2. Edit `.env` and set the keys you need (quotes optional)
+3. Restart the app (`run.bat` / `python launch.py`)
+
+| Variable | Used for | When needed |
+|----------|----------|-------------|
+| `HF_TOKEN_TRANSCRIBE` | Pyannote diarization | Any **Transcribe…** mode |
+| `OPENAI_API_KEY` | GPT analysis / chat | Backend is **gpt-*** and you analyze |
+| `GEMINI_TRANSCRIBE_ANALYSIS_API_KEY` | Gemini analysis | Backend is **gemini-*** and you analyze |
+| `VOCALTRACE_FFMPEG` | Path to ffmpeg | Only if ffmpeg is not on PATH |
+
+All three API keys can be set under **Settings (API keys)…** (status strip shows `HF ✓/✗ · OpenAI ✓/✗ · Gemini ✓/✗`).
+
+`launch.py` loads `.env` via **python-dotenv**. Existing OS environment variables are not overwritten.
+
+#### Hugging Face + Pyannote (important)
+
+Pyannote models are **gated**. A token alone is not enough until you accept the license.
+
+**In the app (recommended)**  
+1. Click **Settings (API keys)…**  
+2. Paste your Hugging Face token → **Save**  
+3. Status should show **HF token: set**  
+4. Still open the model page once and accept access (browser, same HF account)
+
+**Or via `.env`**  
+```env
+HF_TOKEN_TRANSCRIBE=hf_your_token_here
+```
+
+1. Create a token: https://huggingface.co/settings/tokens  
+2. Accept access, e.g. https://huggingface.co/pyannote/speaker-diarization-3.1  
+3. Save Settings or edit `.env` (Settings applies immediately; `.env`-only needs restart if the app was already open without the key)
+
+If diarization fails with 401/403 “gated” / “not authorized”, the license click or token is usually wrong.
 
 
 ### Optional: FlashAttention2 (lower VRAM, faster inference)
@@ -224,10 +359,30 @@ python launch.py
 ---
 
 ## Troubleshooting
-### torchcodec Warning
-VocalTrace bypasses the use of torchcodec so it is safe to ignore the warning:
-"UserWarning: 
-torchcodec is not installed correctly so built-in audio decoding will fail."
+
+### `AttributeError: '_SixMetaPathImporter' object has no attribute '_path'`
+Your Python is almost certainly **3.12.0–3.12.9**. Upgrade to **3.12.10+**, delete the old venv, and recreate it with that interpreter (see **Requirements** above). Plain `python=3.12` in Conda can resolve to a broken patch level — pin `python=3.12.10`.
+
+### torchcodec must not be installed
+
+**Problem:** `torchaudio` 2.8+ may install **`torchcodec`**. With that package present,
+VocalTrace often **will not start** on Windows (broken `libtorchcodec` / FFmpeg DLLs).
+
+**What VocalTrace does:**
+
+1. `installation.bat` / `installation.sh` run `pip uninstall torchcodec` after deps  
+2. **`launch.py` auto-uninstalls torchcodec** before importing torch/torchaudio/pyannote  
+
+Audio uses **soundfile** + **system ffmpeg**, never TorchCodec.
+
+Manual fix (if needed):
+
+```bat
+.venv\Scripts\python.exe -m pip uninstall -y torchcodec
+python launch.py
+```
+
+Do **not** reinstall torchcodec. Keep a normal system `ffmpeg` on PATH.
 
 ### PySide6 / Qt import errors (Windows)
 If you previously installed `ffmpeg` via **Conda** in the same environment and PySide6 fails to import, remove the conda ffmpeg package:

@@ -6,7 +6,7 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QFileDialog,
     QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
     QTextEdit, QComboBox, QTabWidget, QMessageBox, QCheckBox,
-    QProgressBar, QGroupBox, QSlider, QStyle
+    QProgressBar, QGroupBox, QSlider, QStyle,
 )
 
 import json
@@ -28,6 +28,32 @@ from analysis_engine import (
     call_llm_gemini_25_pro,
     call_llm_lmstudio
 )
+from ui.settings_dialog import (
+    SettingsDialog,
+    get_gemini_api_key,
+    get_hf_token,
+    get_openai_api_key,
+    key_status_summary,
+)
+from model_catalog import (
+    FALLBACK_GEMINI,
+    FALLBACK_LMSTUDIO,
+    FALLBACK_OPENAI,
+    build_backend_list,
+    model_id_for_api,
+    provider_for_model,
+)
+
+
+def hf_token_help_text(model_id: str | None = None) -> str:
+    model = model_id or "pyannote/speaker-diarization-3.1"
+    return (
+        "Pyannote diarization needs a Hugging Face access token.\n\n"
+        "Easiest: Settings (API keys) → Hugging Face token → Save.\n\n"
+        "1) Create a token: https://huggingface.co/settings/tokens\n"
+        f"2) Accept model access: https://huggingface.co/{model}\n"
+        "3) Paste into Settings (or .env as HF_TOKEN_TRANSCRIBE=...)\n"
+    )
 
 
 def extract_text_content(lines_str):
@@ -72,12 +98,26 @@ def fmt_ms(ms):
 
 
 def _pick_backend(name: str) -> Callable[[str, str], str]:
-    if "gemini" in name.lower():
+    prov = provider_for_model(name)
+    if prov == "gemini":
         return call_llm_gemini_25_pro
-    elif "lmstudio" in name.lower():
-            return call_llm_lmstudio
-    else:
-        return call_llm_openai
+    if prov == "lmstudio":
+        return call_llm_lmstudio
+    return call_llm_openai
+
+
+class ModelListWorker(QThread):
+    """Fetch OpenAI / Gemini / LM Studio model lists off the UI thread."""
+
+    finished_ok = Signal(list, str)  # models, note
+    failed = Signal(str)
+
+    def run(self):
+        try:
+            models, note = build_backend_list()
+            self.finished_ok.emit(models, note)
+        except Exception as e:
+            self.failed.emit(str(e))
 
 
 class MainWindow(QMainWindow):
@@ -100,9 +140,19 @@ class MainWindow(QMainWindow):
         self.audio_label = QLabel("No audio file selected")
         self.btn_audio = QPushButton("Open audio...")
         self.btn_audio.clicked.connect(self.choose_audio_file)
+        self.btn_settings = QPushButton("Settings (API keys)…")
+        self.btn_settings.setToolTip(
+            "Hugging Face token (Pyannote), OpenAI, Gemini — saved to .env"
+        )
+        self.btn_settings.clicked.connect(self.open_settings)
+        self.hf_status = QLabel("")
+        self.hf_status.setStyleSheet("color: #888;")
         top_files.addWidget(self.audio_label, 3)
+        top_files.addWidget(self.hf_status, 0)
+        top_files.addWidget(self.btn_settings, 0)
         top_files.addWidget(self.btn_audio, 1)
         self._original_audio_path = None
+        self._refresh_hf_status()
         # ------------------------------------------------------------------ #
         # 2. Fingerprints & Strategy
         # ------------------------------------------------------------------ #
@@ -137,11 +187,13 @@ class MainWindow(QMainWindow):
         self.diarization_model_label.setStyleSheet("font-weight: bold;")
         self.combo_diarization_model = QComboBox()
         self.combo_diarization_model.addItems([
-            "pyannote/speaker-diarization-community-1",
             "pyannote/speaker-diarization-3.1",
+            "pyannote/speaker-diarization-community-1",
         ])
         self.combo_diarization_model.setToolTip(
-            "Which Pyannote diarization model to use."
+            "Pyannote diarization model.\n"
+            "3.1 (default): fewer, longer turns — faster ASR (~200–300 segs on a 47 min file).\n"
+            "community-1: finer turns — can produce 800+ segments and is much slower to transcribe."
         )
 
         self.transcription_model_label = QLabel("Transcription Model:")
@@ -187,14 +239,28 @@ class MainWindow(QMainWindow):
         self.lang_combo.addItems(["auto", "sv", "en"])
 
         self.backend_combo = QComboBox()
-        self.backend_combo.addItems([
-            "gemini-2.5-flash",
-            "gemini-2.5-pro",
-            "gpt-4o",
-            "gpt-4-turbo",
-            "gpt-5.1",
-            "LMStudio/gpt-oss-20b"
-        ])
+        self.backend_combo.setMinimumWidth(220)
+        self.backend_combo.setToolTip(
+            "Analysis / chat model.\n"
+            "• Offline: models from LM Studio (start Local Server, then ↻)\n"
+            "• Online: also lists OpenAI / Gemini when API keys are set\n"
+            "Click ↻ to refresh."
+        )
+        # Immediate offline defaults; live list loads async after UI is up
+        self.backend_combo.addItems(
+            list(FALLBACK_GEMINI) + list(FALLBACK_OPENAI) + list(FALLBACK_LMSTUDIO)
+        )
+        self.btn_refresh_models = QPushButton("↻")
+        self.btn_refresh_models.setFixedWidth(32)
+        self.btn_refresh_models.setToolTip(
+            "Refresh model list\n"
+            "LM Studio (offline) + OpenAI/Gemini (if keys set)"
+        )
+        self.btn_refresh_models.clicked.connect(self.refresh_backend_models)
+        self.backend_status = QLabel("")
+        self.backend_status.setStyleSheet("color: #888; font-size: 11px;")
+        self.backend_status.setToolTip("Where the Backend list came from")
+
         self.mode_combo = QComboBox()
         self.mode_combo.addItems([
             "Transcribe + analyze audio",
@@ -219,11 +285,18 @@ class MainWindow(QMainWindow):
         options.addWidget(self.lang_combo)
         options.addWidget(QLabel("Backend:"))
         options.addWidget(self.backend_combo)
+        options.addWidget(self.btn_refresh_models)
+        options.addWidget(self.backend_status)
         options.addWidget(QLabel("Mode:"))
         options.addWidget(self.mode_combo)
         options.addStretch(1)
         options.addWidget(self.save_btn)
         options.addWidget(self.run_btn)
+
+        self._model_list_worker: ModelListWorker | None = None
+        # Load live models once the window is shown (non-blocking)
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(200, self.refresh_backend_models)
 
 
         # ------------------------------------------------------------------ #
@@ -345,7 +418,7 @@ class MainWindow(QMainWindow):
 
         self.voice_tab = VoiceManagerTab(
             json_path="voices.json",
-            hf_token=os.getenv("HF_TOKEN_TRANSCRIBE")
+            hf_token=get_hf_token(),
         )
 
         self.chat_tab = ChatTab()
@@ -1034,10 +1107,129 @@ class MainWindow(QMainWindow):
         else:
             self.chat_tab.set_persona("You are a helpful assistant analyzing a transcript.", is_generic=True)
 
+    def open_settings(self) -> None:
+        dlg = SettingsDialog(self)
+        if dlg.exec():
+            # Refresh voice tab token + status after save
+            tok = get_hf_token()
+            if hasattr(self.voice_tab, "hf_token"):
+                self.voice_tab.hf_token = tok
+            self._refresh_hf_status()
+            # Keys may have been added — reload model catalogs
+            self.refresh_backend_models()
+
+    def refresh_backend_models(self) -> None:
+        """Fetch model lists from provider APIs (background thread)."""
+        if self._model_list_worker is not None and self._model_list_worker.isRunning():
+            return
+        self.btn_refresh_models.setEnabled(False)
+        self.backend_status.setText("loading models…")
+        worker = ModelListWorker()
+        self._model_list_worker = worker
+
+        def on_ok(models: list, note: str) -> None:
+            prev = self.backend_combo.currentText()
+            self.backend_combo.blockSignals(True)
+            self.backend_combo.clear()
+            self.backend_combo.addItems(models)
+            # Restore previous selection if still available
+            idx = self.backend_combo.findText(prev)
+            if idx >= 0:
+                self.backend_combo.setCurrentIndex(idx)
+            elif models:
+                self.backend_combo.setCurrentIndex(0)
+            self.backend_combo.blockSignals(False)
+            self.backend_status.setText(note[:80] + ("…" if len(note) > 80 else ""))
+            self.backend_status.setToolTip(note)
+            self.btn_refresh_models.setEnabled(True)
+            # Sync chat tab with new selection
+            self.chat_tab.set_model_config(self.backend_combo.currentText())
+            self._model_list_worker = None
+
+        def on_fail(msg: str) -> None:
+            self.backend_status.setText("model list failed — using defaults")
+            self.backend_status.setToolTip(msg)
+            self.btn_refresh_models.setEnabled(True)
+            self._model_list_worker = None
+
+        worker.finished_ok.connect(on_ok)
+        worker.failed.connect(on_fail)
+        worker.start()
+
+    def _refresh_hf_status(self) -> None:
+        # Compact strip: HF / OpenAI / Gemini set-or-not
+        summary = key_status_summary()
+        missing = not get_hf_token()
+        self.hf_status.setText(summary)
+        if missing:
+            self.hf_status.setStyleSheet("color: #c62828; font-weight: 600;")
+        else:
+            self.hf_status.setStyleSheet("color: #2e7d32; font-weight: 600;")
+        self.hf_status.setToolTip(
+            "API key status (Settings / .env).\n"
+            f"HF (Pyannote diarization): {'set' if get_hf_token() else 'MISSING'}\n"
+            f"OpenAI (gpt-* analysis): {'set' if get_openai_api_key() else 'not set'}\n"
+            f"Gemini (gemini-* analysis): {'set' if get_gemini_api_key() else 'not set'}\n\n"
+            "Click Settings (API keys) to edit."
+        )
+
+    def _prompt_settings(self, title: str, body: str, check) -> bool:
+        if check():
+            return True
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle(title)
+        box.setText(body)
+        open_btn = box.addButton("Open Settings…", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.exec()
+        if box.clickedButton() is open_btn:
+            self.open_settings()
+            return bool(check())
+        return False
+
+    def _ensure_hf_token(self) -> bool:
+        return self._prompt_settings(
+            "Hugging Face token required",
+            "Pyannote diarization needs a Hugging Face token.\n\n"
+            + hf_token_help_text(self.combo_diarization_model.currentText()),
+            get_hf_token,
+        )
+
+    def _ensure_llm_keys_for_backend(self, backend_label: str) -> bool:
+        """OpenAI / Gemini keys only when analysis uses those backends."""
+        b = backend_label.lower()
+        if b.startswith("lmstudio"):
+            return True
+        if "gemini" in b:
+            return self._prompt_settings(
+                "Gemini API key required",
+                "Backend is a Gemini model, but no Gemini key is set.\n\n"
+                "Open Settings (API keys) and paste your key as "
+                "GEMINI_TRANSCRIBE_ANALYSIS_API_KEY.\n\n"
+                "Get a key: https://aistudio.google.com/apikey\n\n"
+                "Or switch Backend to LMStudio / skip analysis "
+                "(“Transcribe audio only”).",
+                get_gemini_api_key,
+            )
+        if "gpt" in b or b.startswith("openai"):
+            return self._prompt_settings(
+                "OpenAI API key required",
+                "Backend is a GPT model, but OPENAI_API_KEY is not set.\n\n"
+                "Open Settings (API keys) and paste your OpenAI key.\n\n"
+                "Get a key: https://platform.openai.com/api-keys\n\n"
+                "Or switch Backend to Gemini / LMStudio, or use "
+                "“Transcribe audio only”.",
+                get_openai_api_key,
+            )
+        return True
+
     def run_analysis(self):
         transcript_text = self.transcript_edit.toPlainText().strip()
         lang = self.lang_combo.currentText()
         backend_label = self.backend_combo.currentText()
+        # Combo shows full id; API calls need id without LMStudio/ prefix
+        model_for_api = model_id_for_api(backend_label)
         call_llm = _pick_backend(backend_label)
         mode = self.mode_combo.currentText()
 
@@ -1045,13 +1237,20 @@ class MainWindow(QMainWindow):
             if not self._audio_path:
                 QMessageBox.information(self, "No audio", "Select an audio file.")
                 return
-            self._do_full_pipeline(lang, call_llm, backend_label)
+            if not self._ensure_hf_token():
+                return
+            if not self._ensure_llm_keys_for_backend(backend_label):
+                return
+            self._do_full_pipeline(lang, call_llm, model_for_api)
             return
 
         if mode.startswith("Transcribe audio only"):
             if not self._audio_path:
                 QMessageBox.information(self, "No audio", "Select an audio file.")
                 return
+            if not self._ensure_hf_token():
+                return
+            # No OpenAI/Gemini key needed for audio-only
             self._do_transcribe_only(lang)
             return
 
@@ -1059,7 +1258,9 @@ class MainWindow(QMainWindow):
             if not transcript_text:
                 QMessageBox.information(self, "No transcript", "Load or paste transcript.")
                 return
-            self._do_analyze_transcript(transcript_text, lang, call_llm, backend_label)
+            if not self._ensure_llm_keys_for_backend(backend_label):
+                return
+            self._do_analyze_transcript(transcript_text, lang, call_llm, model_for_api)
             return
 
     def _set_running(self, running: bool):
@@ -1117,7 +1318,7 @@ class MainWindow(QMainWindow):
             return transcribe_audio_to_text(
                 self._audio_path,
                 language=language,
-                hf_token=os.getenv("HF_TOKEN_TRANSCRIBE"),
+                hf_token=get_hf_token(),
                 fingerprints_dict=active_voices,  # Pass DICT now
                 fingerprints_path=None,
                 id_strategy=strategy,
@@ -1176,7 +1377,7 @@ class MainWindow(QMainWindow):
                 call_llm=call_llm,
                 language=language,
                 #analysis_language=language,
-                hf_token=os.getenv("HF_TOKEN_TRANSCRIBE"),
+                hf_token=get_hf_token(),
                 backend=backend_label,
                 fingerprints_dict=active_voices,
                 fingerprints_path=None,

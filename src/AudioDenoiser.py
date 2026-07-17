@@ -3,8 +3,11 @@ import noisereduce as nr
 from scipy import signal
 from scipy.io import wavfile
 import soundfile as sf
-import torchaudio
 import torch
+import torchaudio
+
+from audio_io import load_mono_numpy
+
 class AudioDenoiser:
     """
     A comprehensive class to clean and denoise audio for improved speech transcription.
@@ -51,22 +54,11 @@ class AudioDenoiser:
         This is critical because downstream ASR components must be told the *true*
         sampling rate of the waveform. We enforce a single SR across the entire
         processing pipeline to avoid subtle time-scale/pitch distortions.
+
+        Uses soundfile / system ffmpeg — never torchaudio.load() / TorchCodec
+        (broken on many Windows setups with torch 2.8+).
         """
-        audio, sr = torchaudio.load(file_path)  # shape: (channels, samples)
-
-        # Resample FIRST to preserve channel alignment
-        if sr != self.sample_rate:
-            audio = torchaudio.functional.resample(audio, sr, self.sample_rate)
-            sr = self.sample_rate
-
-        # Mix to mono if needed
-        if audio.ndim == 2 and audio.shape[0] > 1:
-            audio = audio.mean(dim=0)
-        else:
-            audio = audio.squeeze()
-
-        audio_np = audio.detach().cpu().numpy().astype(np.float32, copy=False)
-        return audio_np, sr
+        return load_mono_numpy(file_path, target_sr=self.sample_rate)
 
     def save_audio(self, audio, output_path, sr=None):
         """Save audio to file."""

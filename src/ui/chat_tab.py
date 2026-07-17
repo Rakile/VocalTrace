@@ -143,20 +143,12 @@ class ChatTab(QWidget):
             self.lbl_persona.setToolTip(instruction_text)
 
     def set_model_config(self, provider_label):
-        provider_label = provider_label.lower()
-        if "lmstudio" in provider_label:
-            self.current_provider = "lmstudio"
-            chosen_model = provider_label.lower().replace("lmstudio", "openai")
-            self.current_model_name = chosen_model
-        elif "gemini" in provider_label:
-            self.current_provider = "gemini"
-            self.current_model_name = provider_label
-        elif "gpt" in provider_label:
-            self.current_provider = "openai"
-            self.current_model_name = provider_label
-        else:
-            self.current_provider = "openai"
-            self.current_model_name = provider_label
+        # provider_label is the Backend combo text (live model id or LMStudio/...)
+        from model_catalog import model_id_for_api, provider_for_model
+
+        label = (provider_label or "").strip()
+        self.current_provider = provider_for_model(label)
+        self.current_model_name = model_id_for_api(label)
 
     def load_transcript(self, transcript_text, path="Unknown", has_analysis=False):
         """
